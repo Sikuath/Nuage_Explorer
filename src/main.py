@@ -43,6 +43,7 @@ from webdav import (
     list_directory,
     download_file,
     upload_file,
+    delete_file,
     WebDAVError,
 )
 
@@ -543,6 +544,45 @@ class MultiUploadWorker(QThread):
 
         self.completed.emit(results)
 
+class DeleteWorker(QThread):
+    completed = Signal(dict)
+
+    def __init__(
+        self,
+        files,
+        username,
+        password,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.files = files
+        self.username = username
+        self.password = password
+
+    def run(self):
+        results = {
+            "success": [],
+            "failed": [],
+        }
+
+        for file in self.files:
+            name = file["name"]
+
+            try:
+                delete_file(
+                    file["url"],
+                    self.username,
+                    self.password,
+                )
+                results["success"].append(name)
+
+            except Exception as exc:
+                results["failed"].append(
+                    (name, str(exc))
+                )
+
+        self.completed.emit(results)
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -562,6 +602,8 @@ class MainWindow(QMainWindow):
         self.multi_upload_dialog = None
         self.multi_download_worker = None
         self.multi_download_dialog = None
+        self.delete_worker = None
+        self.delete_dialog = None
         self.multi_download_skipped = 0
 
         self.setWindowTitle("Nuage Explorer")
@@ -1047,8 +1089,7 @@ class MainWindow(QMainWindow):
             self.download_thread_finished
         )
         self.download_worker.start()
-
-
+    
     def show_context_menu(self, position):
         item = self.table.itemAt(position)
         if item is None:
@@ -1060,8 +1101,6 @@ class MainWindow(QMainWindow):
             for index in self.table.selectionModel().selectedRows()
         }
 
-        # Un clic droit hors de la sélection sélectionne
-        # uniquement la ligne cliquée.
         if row not in selected_rows:
             self.table.clearSelection()
             self.table.selectRow(row)
@@ -1072,18 +1111,173 @@ class MainWindow(QMainWindow):
         })
 
         has_files = False
+
         for selected_row in selected_rows:
             name_item = self.table.item(selected_row, 0)
             data = name_item.data(Qt.ItemDataRole.UserRole)
+
             if data and not data["is_directory"]:
                 has_files = True
                 break
 
         menu = QMenu(self)
+
         download_action = menu.addAction("⬇  Télécharger")
         download_action.setEnabled(has_files)
-        download_action.triggered.connect(self.download_selected)
-        menu.exec(self.table.viewport().mapToGlobal(position))
+        download_action.triggered.connect(
+            self.download_selected
+        )
+
+        delete_action = menu.addAction("🗑  Supprimer")
+        delete_action.setEnabled(has_files)
+        delete_action.triggered.connect(
+            self.delete_selected
+        )
+
+        menu.exec(
+            self.table.viewport().mapToGlobal(position)
+        )
+
+    def delete_selected(self):
+        if not self.profile or not self.url_stack:
+            return
+
+        if (
+            self.delete_worker is not None
+            and self.delete_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Suppression en cours",
+                "Attends la fin de la suppression actuelle.",
+            )
+            return
+
+        rows = sorted({
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        })
+
+        files = []
+
+        for row in rows:
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+
+            data = item.data(Qt.ItemDataRole.UserRole)
+
+            if data and not data["is_directory"]:
+                files.append({
+                    "url": data["url"],
+                    "name": data["name"],
+                })
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun fichier",
+                "Sélectionne au moins un fichier à supprimer.",
+            )
+            return
+
+        names = "\n".join(
+            f"• {file['name']}" for file in files[:10]
+        )
+        if len(files) > 10:
+            names += f"\n… et {len(files) - 10} autre(s) fichier(s)"
+
+        answer = QMessageBox.warning(
+            self,
+            "Confirmer la suppression",
+            f"Tu vas supprimer définitivement "
+            f"{len(files)} fichier(s) de NUAGE :\n\n"
+            f"{names}\n\n"
+            "Cette opération peut être irréversible. "
+            "Continuer ?",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.delete_dialog = QProgressDialog(
+            "Suppression des fichiers…",
+            None,
+            0,
+            len(files),
+            self,
+        )
+        self.delete_dialog.setWindowTitle(
+            "Suppression NUAGE"
+        )
+        self.delete_dialog.setCancelButton(None)
+        self.delete_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.delete_dialog.setMinimumDuration(300)
+        self.delete_dialog.setValue(0)
+        self.delete_dialog.show()
+
+        self.delete_worker = DeleteWorker(
+            files,
+            self.profile["username"],
+            self.profile["password"],
+            self,
+        )
+
+        self.delete_worker.completed.connect(
+            self.delete_completed
+        )
+        self.delete_worker.finished.connect(
+        self.delete_thread_finished
+        )
+        self.delete_worker.start()
+
+    def delete_completed(self, results):
+        if self.delete_dialog is not None:
+            self.delete_dialog.close()
+            self.delete_dialog = None
+
+        successes = results["success"]
+        failures = results["failed"]
+
+        self.refresh()
+
+        summary = (
+            f"Suppressions réussies : {len(successes)}\n"
+            f"Échecs : {len(failures)}"
+        )
+
+        if failures:
+            details = "\n".join(
+                f"• {name} : {message}"
+                for name, message in failures
+            )
+            summary += f"\n\nDétails des erreurs :\n{details}"
+
+        self.status_label.setText(
+            f"Suppression terminée : {len(successes)} supprimé(s), "
+            f"{len(failures)} échec(s)."
+        )
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Bilan des suppressions",
+                summary,
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Bilan des suppressions",
+                summary,
+            )
+
+    def delete_thread_finished(self):
+        self.delete_worker = None
 
     def download_selected(self):
         if not self.profile or not self.url_stack:

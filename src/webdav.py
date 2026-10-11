@@ -355,3 +355,59 @@ def upload_file(
         raise WebDAVError(
             f"Impossible de lire le fichier local : {exc}"
         ) from exc
+
+def delete_file(
+    url: str,
+    username: str,
+    password: str,
+) -> str:
+    """Supprime un fichier distant via WebDAV."""
+    url = url.strip()
+
+    if not url.startswith("https://"):
+        raise WebDAVError(
+            "La suppression exige une adresse HTTPS."
+        )
+
+    if not username.strip() or not password:
+        raise WebDAVError(
+            "Identifiant ou mot de passe manquant."
+        )
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(30.0, connect=15.0),
+            follow_redirects=True,
+            verify=True,
+        ) as client:
+            response = client.delete(
+                url,
+                auth=(username, password),
+            )
+
+        if response.status_code == 401:
+            raise WebDAVError("Authentification refusée (401).")
+        if response.status_code == 403:
+            raise WebDAVError("Suppression interdite (403).")
+        if response.status_code == 404:
+            raise WebDAVError("Fichier introuvable (404).")
+        if response.status_code == 423:
+            raise WebDAVError("Le fichier est verrouillé (423).")
+        if response.status_code not in (200, 202, 204):
+            raise WebDAVError(
+                f"Échec de la suppression : "
+                f"HTTP {response.status_code}."
+            )
+
+        return url
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le délai de suppression est dépassé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(
+            f"Erreur réseau pendant la suppression : {exc}"
+        ) from exc
