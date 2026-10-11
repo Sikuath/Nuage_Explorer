@@ -48,7 +48,6 @@ from webdav import (
     WebDAVError,
 )
 
-
 STYLE = """
 * {
     font-family: "Segoe UI", sans-serif;
@@ -256,7 +255,8 @@ def obtain_vault():
 
         if len(password) < 12:
             QMessageBox.warning(
-                None, "Mot de passe trop court",
+                None,
+                "Mot de passe trop court",
                 "Choisis au moins 12 caractères.",
             )
             continue
@@ -272,7 +272,8 @@ def obtain_vault():
 
         if password != confirmation:
             QMessageBox.warning(
-                None, "Erreur",
+                None,
+                "Erreur",
                 "Les deux mots de passe sont différents.",
             )
             continue
@@ -310,9 +311,7 @@ class ProfileDialog(QDialog):
         form.setSpacing(12)
 
         self.url = QLineEdit(profile.get("url", ""))
-        self.url.setPlaceholderText(
-            "https://serveur/remote.php/dav/files/identifiant/"
-        )
+        self.url.setPlaceholderText("https://serveur/remote.php/dav/files/identifiant/")
 
         self.username = QLineEdit(profile.get("username", ""))
 
@@ -329,12 +328,10 @@ class ProfileDialog(QDialog):
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(
-            QDialogButtonBox.StandardButton.Save
-        ).setText("Tester et enregistrer")
-        buttons.button(
-            QDialogButtonBox.StandardButton.Save
-        ).setObjectName("primary")
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText(
+            "Tester et enregistrer"
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setObjectName("primary")
         buttons.accepted.connect(self.test_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -346,14 +343,16 @@ class ProfileDialog(QDialog):
 
         if not url or not username or not password:
             QMessageBox.warning(
-                self, "Informations manquantes",
+                self,
+                "Informations manquantes",
                 "Renseigne les trois champs.",
             )
             return
 
         if not url.startswith("https://"):
             QMessageBox.warning(
-                self, "Adresse incorrecte",
+                self,
+                "Adresse incorrecte",
                 "L'adresse doit commencer par https://",
             )
             return
@@ -374,9 +373,9 @@ class ProfileDialog(QDialog):
         }
 
         QMessageBox.information(
-            self, "Connexion réussie",
-            f"Connexion WebDAV validée.\n"
-            f"{len(entries)} éléments reçus.",
+            self,
+            "Connexion réussie",
+            f"Connexion WebDAV validée.\n" f"{len(entries)} éléments reçus.",
         )
         self.accept()
 
@@ -406,14 +405,13 @@ class DownloadWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
 class MultiDownloadWorker(QThread):
     progress = Signal(int)
     current_file = Signal(str)
     completed = Signal(object)
 
-    def __init__(
-        self, files, destination, username, password, parent=None
-    ):
+    def __init__(self, files, destination, username, password, parent=None):
         super().__init__(parent)
         self.files = files
         self.destination = Path(destination)
@@ -486,6 +484,7 @@ class UploadWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+
 class MultiUploadWorker(QThread):
     progress = Signal(int)
     current_file = Signal(str)
@@ -518,9 +517,7 @@ class MultiUploadWorker(QThread):
             self.current_file.emit(name)
 
             def update_progress(percent, index=index):
-                overall = int(
-                    (index + percent / 100) / total * 100
-                )
+                overall = int((index + percent / 100) / total * 100)
                 self.progress.emit(overall)
 
             try:
@@ -535,28 +532,25 @@ class MultiUploadWorker(QThread):
                 results["success"].append(name)
 
             except Exception as exc:
-                results["failed"].append(
-                    (name, str(exc))
-                )
+                results["failed"].append((name, str(exc)))
 
-            self.progress.emit(
-                int((index + 1) / total * 100)
-            )
+            self.progress.emit(int((index + 1) / total * 100))
 
         self.completed.emit(results)
+
 
 class DeleteWorker(QThread):
     completed = Signal(dict)
 
     def __init__(
         self,
-        files,
+        items,
         username,
         password,
         parent=None,
     ):
         super().__init__(parent)
-        self.files = files
+        self.items = items
         self.username = username
         self.password = password
 
@@ -566,23 +560,22 @@ class DeleteWorker(QThread):
             "failed": [],
         }
 
-        for file in self.files:
-            name = file["name"]
+        for item in self.items:
+            name = item["name"]
 
             try:
                 delete_file(
-                    file["url"],
+                    item["url"],
                     self.username,
                     self.password,
                 )
                 results["success"].append(name)
 
             except Exception as exc:
-                results["failed"].append(
-                    (name, str(exc))
-                )
+                results["failed"].append((name, str(exc)))
 
         self.completed.emit(results)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
@@ -725,24 +718,12 @@ class MainWindow(QMainWindow):
 
         # Tableau de fichiers
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(
-            ["Nom", "Taille", "Modifié le", "Type"]
-        )
-        self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
-        self.table.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu
-        )
-        self.table.customContextMenuRequested.connect(
-            self.show_context_menu
-        )
-        self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers
-        )
+        self.table.setHorizontalHeaderLabels(["Nom", "Taille", "Modifié le", "Type"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
@@ -772,9 +753,7 @@ class MainWindow(QMainWindow):
             )
             self.refresh()
         else:
-            self.path_label.setText(
-                "Configure ton compte pour commencer"
-            )
+            self.path_label.setText("Configure ton compte pour commencer")
             self.status_label.setText(
                 "Aucun compte configuré. Ouvre « Compte et connexion »."
             )
@@ -800,18 +779,14 @@ class MainWindow(QMainWindow):
                 new_data,
             )
         except (VaultError, OSError) as exc:
-            QMessageBox.critical(
-                self, "Enregistrement impossible", str(exc)
-            )
+            QMessageBox.critical(self, "Enregistrement impossible", str(exc))
             return
 
         self.vault_data = new_data
         self.profile = new_profile
         self.url_stack = [self.profile["url"]]
         self.rebuild_tree()
-        self.account_label.setText(
-            f"●  Connecté à NUAGE\n{self.profile['username']}"
-        )
+        self.account_label.setText(f"●  Connecté à NUAGE\n{self.profile['username']}")
         self.home_button.setChecked(True)
         self.refresh()
 
@@ -826,7 +801,6 @@ class MainWindow(QMainWindow):
             self.tree.setCurrentItem(self.tree_root)
         self.refresh()
 
-
     def rebuild_tree(self):
         """Reconstruit la racine de l'arborescence NUAGE."""
         self.tree.clear()
@@ -836,9 +810,7 @@ class MainWindow(QMainWindow):
             return
 
         root = QTreeWidgetItem(["☁  Mon NUAGE"])
-        root.setData(
-            0, Qt.ItemDataRole.UserRole, self.profile["url"]
-        )
+        root.setData(0, Qt.ItemDataRole.UserRole, self.profile["url"])
         root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
 
         self.tree.addTopLevelItem(root)
@@ -867,12 +839,8 @@ class MainWindow(QMainWindow):
         except WebDAVError as exc:
             item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
             item.addChild(QTreeWidgetItem(["Chargement…"]))
-            self.status_label.setText(
-                "Impossible de charger les sous-dossiers."
-            )
-            QMessageBox.warning(
-                self, "Erreur WebDAV", str(exc)
-            )
+            self.status_label.setText("Impossible de charger les sous-dossiers.")
+            QMessageBox.warning(self, "Erreur WebDAV", str(exc))
             return
 
         current = urlsplit(url)
@@ -891,17 +859,11 @@ class MainWindow(QMainWindow):
             if parsed.path.rstrip("/") == current.path.rstrip("/"):
                 continue
 
-            name = entry.get("name") or (
-                parsed.path.rstrip("/").split("/")[-1]
-            )
+            name = entry.get("name") or (parsed.path.rstrip("/").split("/")[-1])
 
             child = QTreeWidgetItem([f"📁  {name}"])
-            child.setData(
-                0, Qt.ItemDataRole.UserRole, child_url
-            )
-            child.setData(
-                0, Qt.ItemDataRole.UserRole + 1, False
-            )
+            child.setData(0, Qt.ItemDataRole.UserRole, child_url)
+            child.setData(0, Qt.ItemDataRole.UserRole + 1, False)
 
             # Le faux enfant permet d'afficher le triangle
             # même avant le chargement des sous-dossiers.
@@ -920,17 +882,13 @@ class MainWindow(QMainWindow):
         current_item = item
 
         while current_item is not None:
-            current_url = current_item.data(
-                0, Qt.ItemDataRole.UserRole
-            )
+            current_url = current_item.data(0, Qt.ItemDataRole.UserRole)
             if current_url:
                 stack.append(current_url.rstrip("/") + "/")
             current_item = current_item.parent()
 
         self.url_stack = list(reversed(stack))
-        self.home_button.setChecked(
-            item == self.tree_root
-        )
+        self.home_button.setChecked(item == self.tree_root)
         self.refresh()
 
     def refresh(self):
@@ -1020,9 +978,7 @@ class MainWindow(QMainWindow):
         )
 
     def open_item(self, item):
-        data = self.table.item(item.row(), 0).data(
-            Qt.ItemDataRole.UserRole
-        )
+        data = self.table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
 
         if not data:
             return
@@ -1033,12 +989,9 @@ class MainWindow(QMainWindow):
             return
 
         # Éviter deux téléchargements simultanés.
-        if (
-            (self.download_worker is not None
-             and self.download_worker.isRunning())
-            or
-            (self.multi_download_worker is not None
-             and self.multi_download_worker.isRunning())
+        if (self.download_worker is not None and self.download_worker.isRunning()) or (
+            self.multi_download_worker is not None
+            and self.multi_download_worker.isRunning()
         ):
             QMessageBox.information(
                 self,
@@ -1066,9 +1019,7 @@ class MainWindow(QMainWindow):
         )
         self.download_dialog.setWindowTitle("Téléchargement")
         self.download_dialog.setCancelButton(None)
-        self.download_dialog.setWindowModality(
-            Qt.WindowModality.WindowModal
-        )
+        self.download_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.download_dialog.setMinimumDuration(300)
         self.download_dialog.setValue(0)
         self.download_dialog.show()
@@ -1081,20 +1032,13 @@ class MainWindow(QMainWindow):
             self,
         )
 
-        self.download_worker.progress.connect(
-            self.download_progress
-        )
-        self.download_worker.succeeded.connect(
-            self.download_succeeded
-        )
-        self.download_worker.failed.connect(
-            self.download_failed
-        )
-        self.download_worker.finished.connect(
-            self.download_thread_finished
-        )
+        self.download_worker.progress.connect(self.download_progress)
+        self.download_worker.succeeded.connect(self.download_succeeded)
+        self.download_worker.failed.connect(self.download_failed)
+        self.download_worker.finished.connect(self.download_thread_finished)
         self.download_worker.start()
-    
+
+
     def show_context_menu(self, position):
         item = self.table.itemAt(position)
         if item is None:
@@ -1102,55 +1046,50 @@ class MainWindow(QMainWindow):
 
         row = item.row()
         selected_rows = {
-            index.row()
-            for index in self.table.selectionModel().selectedRows()
+            index.row() for index in self.table.selectionModel().selectedRows()
         }
 
         if row not in selected_rows:
             self.table.clearSelection()
             self.table.selectRow(row)
 
-        selected_rows = sorted({
-            index.row()
-            for index in self.table.selectionModel().selectedRows()
-        })
+        selected_rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
 
         has_files = False
+        has_items = False
 
         for selected_row in selected_rows:
             name_item = self.table.item(selected_row, 0)
+            if name_item is None:
+                continue
+
             data = name_item.data(Qt.ItemDataRole.UserRole)
 
-            if data and not data["is_directory"]:
-                has_files = True
-                break
+            if data:
+                has_items = True
+                if not data["is_directory"]:
+                    has_files = True
 
         menu = QMenu(self)
 
         download_action = menu.addAction("⬇  Télécharger")
         download_action.setEnabled(has_files)
-        download_action.triggered.connect(
-            self.download_selected
-        )
+        download_action.triggered.connect(self.download_selected)
 
         delete_action = menu.addAction("🗑  Supprimer")
-        delete_action.setEnabled(has_files)
-        delete_action.triggered.connect(
-            self.delete_selected
-        )
+        delete_action.setEnabled(has_items)
+        delete_action.triggered.connect(self.delete_selected)
 
-        menu.exec(
-            self.table.viewport().mapToGlobal(position)
-        )
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
 
     def delete_selected(self):
         if not self.profile or not self.url_stack:
             return
 
-        if (
-            self.delete_worker is not None
-            and self.delete_worker.isRunning()
-        ):
+        if self.delete_worker is not None and self.delete_worker.isRunning():
             QMessageBox.information(
                 self,
                 "Suppression en cours",
@@ -1158,50 +1097,51 @@ class MainWindow(QMainWindow):
             )
             return
 
-        rows = sorted({
-            index.row()
-            for index in self.table.selectionModel().selectedRows()
-        })
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
 
-        files = []
+        items = []
 
         for row in rows:
-            item = self.table.item(row, 0)
-            if item is None:
+            name_item = self.table.item(row, 0)
+            if name_item is None:
                 continue
 
-            data = item.data(Qt.ItemDataRole.UserRole)
+            data = name_item.data(Qt.ItemDataRole.UserRole)
 
-            if data and not data["is_directory"]:
-                files.append({
-                    "url": data["url"],
-                    "name": data["name"],
-                })
+            if data:
+                items.append(
+                    {
+                        "url": data["url"],
+                        "name": data["name"],
+                        "is_directory": data["is_directory"],
+                    }
+                )
 
-        if not files:
+        if not items:
             QMessageBox.information(
                 self,
-                "Aucun fichier",
-                "Sélectionne au moins un fichier à supprimer.",
+                "Aucun élément",
+                "Sélectionne au moins un fichier ou un dossier.",
             )
             return
 
         names = "\n".join(
-            f"• {file['name']}" for file in files[:10]
+            f"• {'[Dossier]' if item['is_directory'] else '[Fichier]'} " f"{item['name']}"
+            for item in items[:10]
         )
-        if len(files) > 10:
-            names += f"\n… et {len(files) - 10} autre(s) fichier(s)"
+
+        if len(items) > 10:
+            names += f"\n… et {len(items) - 10} autre(s) élément(s)"
 
         answer = QMessageBox.warning(
             self,
             "Confirmer la suppression",
-            f"Tu vas supprimer définitivement "
-            f"{len(files)} fichier(s) de NUAGE :\n\n"
+            f"Tu vas supprimer {len(items)} élément(s) de NUAGE :\n\n"
             f"{names}\n\n"
-            "Cette opération peut être irréversible. "
-            "Continuer ?",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.Cancel,
+            "Attention : supprimer un dossier peut aussi supprimer "
+            "son contenu selon le comportement du serveur.\n\n"
+            "Cette opération peut être irréversible. Continuer ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
 
@@ -1209,36 +1149,28 @@ class MainWindow(QMainWindow):
             return
 
         self.delete_dialog = QProgressDialog(
-            "Suppression des fichiers…",
+            "Suppression des éléments…",
             None,
             0,
-            len(files),
+            len(items),
             self,
         )
-        self.delete_dialog.setWindowTitle(
-            "Suppression NUAGE"
-        )
+        self.delete_dialog.setWindowTitle("Suppression NUAGE")
         self.delete_dialog.setCancelButton(None)
-        self.delete_dialog.setWindowModality(
-            Qt.WindowModality.WindowModal
-        )
+        self.delete_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.delete_dialog.setMinimumDuration(300)
         self.delete_dialog.setValue(0)
         self.delete_dialog.show()
 
         self.delete_worker = DeleteWorker(
-            files,
+            items,
             self.profile["username"],
             self.profile["password"],
             self,
         )
 
-        self.delete_worker.completed.connect(
-            self.delete_completed
-        )
-        self.delete_worker.finished.connect(
-        self.delete_thread_finished
-        )
+        self.delete_worker.completed.connect(self.delete_completed)
+        self.delete_worker.finished.connect(self.delete_thread_finished)
         self.delete_worker.start()
 
     def delete_completed(self, results):
@@ -1252,15 +1184,11 @@ class MainWindow(QMainWindow):
         self.refresh()
 
         summary = (
-            f"Suppressions réussies : {len(successes)}\n"
-            f"Échecs : {len(failures)}"
+            f"Suppressions réussies : {len(successes)}\n" f"Échecs : {len(failures)}"
         )
 
         if failures:
-            details = "\n".join(
-                f"• {name} : {message}"
-                for name, message in failures
-            )
+            details = "\n".join(f"• {name} : {message}" for name, message in failures)
             summary += f"\n\nDétails des erreurs :\n{details}"
 
         self.status_label.setText(
@@ -1288,12 +1216,9 @@ class MainWindow(QMainWindow):
         if not self.profile or not self.url_stack:
             return
 
-        if (
-            (self.download_worker is not None
-             and self.download_worker.isRunning())
-            or
-            (self.multi_download_worker is not None
-             and self.multi_download_worker.isRunning())
+        if (self.download_worker is not None and self.download_worker.isRunning()) or (
+            self.multi_download_worker is not None
+            and self.multi_download_worker.isRunning()
         ):
             QMessageBox.information(
                 self,
@@ -1302,10 +1227,9 @@ class MainWindow(QMainWindow):
             )
             return
 
-        rows = sorted({
-            index.row()
-            for index in self.table.selectionModel().selectedRows()
-        })
+        rows = sorted(
+            {index.row() for index in self.table.selectionModel().selectedRows()}
+        )
 
         files = []
         skipped_directories = 0
@@ -1321,10 +1245,12 @@ class MainWindow(QMainWindow):
                 skipped_directories += 1
                 continue
 
-            files.append({
-                "url": data["url"],
-                "name": data["name"],
-            })
+            files.append(
+                {
+                    "url": data["url"],
+                    "name": data["name"],
+                }
+            )
 
         if not files:
             QMessageBox.information(
@@ -1343,7 +1269,8 @@ class MainWindow(QMainWindow):
 
         # Vérifier les éventuels fichiers déjà présents.
         existing = [
-            item for item in files
+            item
+            for item in files
             if (Path(destination) / Path(item["name"]).name).exists()
         ]
 
@@ -1368,13 +1295,8 @@ class MainWindow(QMainWindow):
                 return
 
             if answer == QMessageBox.StandardButton.No:
-                existing_names = {
-                    item["name"] for item in existing
-                }
-                files = [
-                    item for item in files
-                    if item["name"] not in existing_names
-                ]
+                existing_names = {item["name"] for item in existing}
+                files = [item for item in files if item["name"] not in existing_names]
                 skipped_existing = len(existing)
 
         if not files:
@@ -1385,9 +1307,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.multi_download_skipped = (
-            skipped_existing + skipped_directories
-        )
+        self.multi_download_skipped = skipped_existing + skipped_directories
 
         self.multi_download_dialog = QProgressDialog(
             "Préparation du téléchargement…",
@@ -1396,13 +1316,9 @@ class MainWindow(QMainWindow):
             100,
             self,
         )
-        self.multi_download_dialog.setWindowTitle(
-            "Téléchargement multiple"
-        )
+        self.multi_download_dialog.setWindowTitle("Téléchargement multiple")
         self.multi_download_dialog.setCancelButton(None)
-        self.multi_download_dialog.setWindowModality(
-            Qt.WindowModality.WindowModal
-        )
+        self.multi_download_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.multi_download_dialog.setMinimumDuration(300)
         self.multi_download_dialog.setValue(0)
         self.multi_download_dialog.show()
@@ -1415,23 +1331,15 @@ class MainWindow(QMainWindow):
             self,
         )
 
-        self.multi_download_worker.progress.connect(
-            self.multi_download_progress
-        )
+        self.multi_download_worker.progress.connect(self.multi_download_progress)
         self.multi_download_worker.current_file.connect(
             self.multi_download_current_file
         )
-        self.multi_download_worker.completed.connect(
-            self.multi_download_completed
-        )
-        self.multi_download_worker.finished.connect(
-            self.multi_download_thread_finished
-        )
+        self.multi_download_worker.completed.connect(self.multi_download_completed)
+        self.multi_download_worker.finished.connect(self.multi_download_thread_finished)
         self.multi_download_worker.start()
 
-        self.status_label.setText(
-            f"Téléchargement de {len(files)} fichier(s)…"
-        )
+        self.status_label.setText(f"Téléchargement de {len(files)} fichier(s)…")
 
     def multi_download_progress(self, percent):
         if self.multi_download_dialog is not None:
@@ -1439,9 +1347,7 @@ class MainWindow(QMainWindow):
 
     def multi_download_current_file(self, name):
         if self.multi_download_dialog is not None:
-            self.multi_download_dialog.setLabelText(
-                f"Téléchargement de {name}…"
-            )
+            self.multi_download_dialog.setLabelText(f"Téléchargement de {name}…")
 
     def multi_download_completed(self, results):
         if self.multi_download_dialog is not None:
@@ -1459,10 +1365,7 @@ class MainWindow(QMainWindow):
         )
 
         if failures:
-            details = "\n".join(
-                f"• {name} : {message}"
-                for name, message in failures
-            )
+            details = "\n".join(f"• {name} : {message}" for name, message in failures)
             summary += f"\n\nDétails des erreurs :\n{details}"
 
         self.status_label.setText(
@@ -1471,13 +1374,9 @@ class MainWindow(QMainWindow):
         )
 
         if failures:
-            QMessageBox.warning(
-                self, "Bilan des téléchargements", summary
-            )
+            QMessageBox.warning(self, "Bilan des téléchargements", summary)
         else:
-            QMessageBox.information(
-                self, "Bilan des téléchargements", summary
-            )
+            QMessageBox.information(self, "Bilan des téléchargements", summary)
 
     def multi_download_thread_finished(self):
         self.multi_download_worker = None
@@ -1594,9 +1493,7 @@ class MainWindow(QMainWindow):
             return
 
         self.refresh()
-        self.status_label.setText(
-            f"✓  Dossier « {name} » créé sur NUAGE."
-        )
+        self.status_label.setText(f"✓  Dossier « {name} » créé sur NUAGE.")
 
         QMessageBox.information(
             self,
@@ -1613,10 +1510,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if (
-            self.upload_worker is not None
-            and self.upload_worker.isRunning()
-        ) or (
+        if (self.upload_worker is not None and self.upload_worker.isRunning()) or (
             self.multi_upload_worker is not None
             and self.multi_upload_worker.isRunning()
         ):
@@ -1639,17 +1533,13 @@ class MainWindow(QMainWindow):
 
         files = []
         existing_names = {
-            self.table.item(row, 0).data(
-                Qt.ItemDataRole.UserRole
-            )["name"].casefold()
+            self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)["name"].casefold()
             for row in range(self.table.rowCount())
             if self.table.item(row, 0) is not None
-            and self.table.item(row, 0).data(
-                Qt.ItemDataRole.UserRole
-            )
-            and not self.table.item(row, 0).data(
-                Qt.ItemDataRole.UserRole
-            )["is_directory"]
+            and self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            and not self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)[
+                "is_directory"
+            ]
         }
 
         overwrite_all = False
@@ -1682,11 +1572,13 @@ class MainWindow(QMainWindow):
 
                 overwrite = True
 
-            files.append({
-                "source": source,
-                "name": filename,
-                "overwrite": overwrite,
-            })
+            files.append(
+                {
+                    "source": source,
+                    "name": filename,
+                    "overwrite": overwrite,
+                }
+            )
 
         if not files:
             QMessageBox.information(
@@ -1703,13 +1595,9 @@ class MainWindow(QMainWindow):
             100,
             self,
         )
-        self.multi_upload_dialog.setWindowTitle(
-            "Import multiple vers NUAGE"
-        )
+        self.multi_upload_dialog.setWindowTitle("Import multiple vers NUAGE")
         self.multi_upload_dialog.setCancelButton(None)
-        self.multi_upload_dialog.setWindowModality(
-            Qt.WindowModality.WindowModal
-        )
+        self.multi_upload_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.multi_upload_dialog.setMinimumDuration(300)
         self.multi_upload_dialog.setValue(0)
         self.multi_upload_dialog.show()
@@ -1722,24 +1610,13 @@ class MainWindow(QMainWindow):
             self,
         )
 
-        self.multi_upload_worker.progress.connect(
-            self.multi_upload_progress
-        )
-        self.multi_upload_worker.current_file.connect(
-            self.multi_upload_current_file
-        )
-        self.multi_upload_worker.completed.connect(
-            self.multi_upload_completed
-        )
-        self.multi_upload_worker.finished.connect(
-            self.multi_upload_thread_finished
-        )
+        self.multi_upload_worker.progress.connect(self.multi_upload_progress)
+        self.multi_upload_worker.current_file.connect(self.multi_upload_current_file)
+        self.multi_upload_worker.completed.connect(self.multi_upload_completed)
+        self.multi_upload_worker.finished.connect(self.multi_upload_thread_finished)
         self.multi_upload_worker.start()
 
-        self.status_label.setText(
-            f"Envoi de {len(files)} fichier(s) vers NUAGE…"
-        )
-
+        self.status_label.setText(f"Envoi de {len(files)} fichier(s) vers NUAGE…")
 
     def multi_upload_progress(self, percent):
         if self.multi_upload_dialog is not None:
@@ -1747,9 +1624,7 @@ class MainWindow(QMainWindow):
 
     def multi_upload_current_file(self, name):
         if self.multi_upload_dialog is not None:
-            self.multi_upload_dialog.setLabelText(
-                f"Envoi de {name} vers NUAGE…"
-            )
+            self.multi_upload_dialog.setLabelText(f"Envoi de {name} vers NUAGE…")
 
     def multi_upload_completed(self, results):
         if self.multi_upload_dialog is not None:
@@ -1760,16 +1635,10 @@ class MainWindow(QMainWindow):
         successes = results["success"]
         failures = results["failed"]
 
-        summary = (
-            f"Envois réussis : {len(successes)}\n"
-            f"Échecs : {len(failures)}"
-        )
+        summary = f"Envois réussis : {len(successes)}\n" f"Échecs : {len(failures)}"
 
         if failures:
-            details = "\n".join(
-                f"• {name} : {message}"
-                for name, message in failures
-            )
+            details = "\n".join(f"• {name} : {message}" for name, message in failures)
             summary += f"\n\nDétails des erreurs :\n{details}"
 
         self.refresh()
@@ -1845,6 +1714,7 @@ def main():
 
     if not window.profile:
         from PySide6.QtCore import QTimer
+
         QTimer.singleShot(300, window.configure_profile)
 
     return app.exec()
