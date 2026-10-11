@@ -236,3 +236,122 @@ def download_file(
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+def upload_file(
+    source: str | Path,
+    destination_url: str,
+    username: str,
+    password: str,
+    progress_callback=None,
+    overwrite: bool = False,
+) -> str:
+    """Envoie un fichier local dans un dossier WebDAV."""
+    from urllib.parse import quote, urljoin
+
+    source = Path(source)
+    destination_url = destination_url.strip()
+
+    if not source.is_file():
+        raise WebDAVError(
+            f"Fichier local introuvable : {source}"
+        )
+
+    if not destination_url.startswith("https://"):
+        raise WebDAVError(
+            "L'envoi exige une adresse HTTPS."
+        )
+
+    if not username.strip() or not password:
+        raise WebDAVError(
+            "Identifiant ou mot de passe manquant."
+        )
+
+    target_url = urljoin(
+        destination_url.rstrip("/") + "/",
+        quote(source.name, safe=""),
+    )
+
+    headers = {
+        "Content-Length": str(source.stat().st_size),
+        "Content-Type": "application/octet-stream",
+    }
+
+    # Empêche d'écraser un fichier existant sans confirmation.
+    if not overwrite:
+        headers["If-None-Match"] = "*"
+
+    total = source.stat().st_size
+    uploaded = 0
+    last_percent = -1
+
+    def file_chunks():
+        nonlocal uploaded, last_percent
+
+        with source.open("rb") as file:
+            while True:
+                chunk = file.read(256 * 1024)
+                if not chunk:
+                    break
+
+                uploaded += len(chunk)
+
+                if progress_callback and total > 0:
+                    percent = min(100, uploaded * 100 // total)
+                    if percent != last_percent:
+                        progress_callback(percent)
+                        last_percent = percent
+
+                yield chunk
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=25.0),
+            follow_redirects=True,
+            verify=True,
+        ) as client:
+            response = client.put(
+                target_url,
+                auth=(username, password),
+                headers=headers,
+                content=file_chunks(),
+            )
+
+        if response.status_code == 401:
+            raise WebDAVError("Authentification refusée (401).")
+        if response.status_code == 403:
+            raise WebDAVError("Envoi interdit (403).")
+        if response.status_code == 404:
+            raise WebDAVError("Dossier de destination introuvable (404).")
+        if response.status_code == 412:
+            raise WebDAVError(
+                "Un fichier de ce nom existe déjà. "
+                "Confirme son remplacement avant de recommencer."
+            )
+        if response.status_code == 507:
+            raise WebDAVError(
+                "Espace de stockage NUAGE insuffisant (507)."
+            )
+        if response.status_code not in (200, 201, 204):
+            raise WebDAVError(
+                f"Échec de l'envoi : HTTP {response.status_code}."
+            )
+
+        if progress_callback:
+            progress_callback(100)
+
+        return target_url
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le délai d'envoi est dépassé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(
+            f"Erreur réseau pendant l'envoi : {exc}"
+        ) from exc
+    except OSError as exc:
+        raise WebDAVError(
+            f"Impossible de lire le fichier local : {exc}"
+        ) from exc

@@ -1,5 +1,5 @@
-
 import sys
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QFileDialog,
+    QMenu,
     QProgressDialog,
 )
 
@@ -36,7 +37,12 @@ from vault import (
     InvalidVaultError,
     VaultError,
 )
-from webdav import list_directory, download_file, WebDAVError
+from webdav import (
+    list_directory,
+    download_file,
+    upload_file,
+    WebDAVError,
+)
 
 
 STYLE = """
@@ -376,6 +382,86 @@ class DownloadWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+class MultiDownloadWorker(QThread):
+    progress = Signal(int)
+    current_file = Signal(str)
+    completed = Signal(object)
+
+    def __init__(
+        self, files, destination, username, password, parent=None
+    ):
+        super().__init__(parent)
+        self.files = files
+        self.destination = Path(destination)
+        self.username = username
+        self.password = password
+
+    def run(self):
+        results = {"success": [], "failed": []}
+        total = len(self.files)
+
+        for index, item in enumerate(self.files):
+            name = item["name"]
+            self.current_file.emit(name)
+
+            destination = self.destination / Path(name).name
+
+            def report_progress(percent, index=index):
+                overall = int((index * 100 + percent) / total)
+                self.progress.emit(min(100, overall))
+
+            try:
+                result = download_file(
+                    item["url"],
+                    self.username,
+                    self.password,
+                    destination,
+                    report_progress,
+                )
+                results["success"].append(str(result))
+
+            except Exception as exc:
+                results["failed"].append((name, str(exc)))
+
+        self.progress.emit(100)
+        self.completed.emit(results)
+
+
+class UploadWorker(QThread):
+    progress = Signal(int)
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        source,
+        destination_url,
+        username,
+        password,
+        overwrite=False,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.source = source
+        self.destination_url = destination_url
+        self.username = username
+        self.password = password
+        self.overwrite = overwrite
+
+    def run(self):
+        try:
+            result = upload_file(
+                self.source,
+                self.destination_url,
+                self.username,
+                self.password,
+                self.progress.emit,
+                overwrite=self.overwrite,
+            )
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -389,6 +475,11 @@ class MainWindow(QMainWindow):
         # Références conservées pendant le téléchargement
         self.download_worker = None
         self.download_dialog = None
+        self.upload_worker = None
+        self.upload_dialog = None
+        self.multi_download_worker = None
+        self.multi_download_dialog = None
+        self.multi_download_skipped = 0
 
         self.setWindowTitle("Nuage Explorer")
         self.resize(1100, 700)
@@ -462,6 +553,11 @@ class MainWindow(QMainWindow):
         top.addLayout(heading_box)
         top.addStretch()
 
+        self.upload_button = QPushButton("↑  Importer un fichier")
+        self.upload_button.setObjectName("primary")
+        self.upload_button.clicked.connect(self.import_file)
+        top.addWidget(self.upload_button)
+
         self.refresh_button = QPushButton("↻  Actualiser")
         self.refresh_button.clicked.connect(self.refresh)
         top.addWidget(self.refresh_button)
@@ -496,7 +592,13 @@ class MainWindow(QMainWindow):
             QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.table.customContextMenuRequested.connect(
+            self.show_context_menu
         )
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -740,6 +842,241 @@ class MainWindow(QMainWindow):
         )
         self.download_worker.start()
 
+
+    def show_context_menu(self, position):
+        item = self.table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        selected_rows = {
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        }
+
+        # Un clic droit hors de la sélection sélectionne
+        # uniquement la ligne cliquée.
+        if row not in selected_rows:
+            self.table.clearSelection()
+            self.table.selectRow(row)
+
+        selected_rows = sorted({
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        })
+
+        has_files = False
+        for selected_row in selected_rows:
+            name_item = self.table.item(selected_row, 0)
+            data = name_item.data(Qt.ItemDataRole.UserRole)
+            if data and not data["is_directory"]:
+                has_files = True
+                break
+
+        menu = QMenu(self)
+        download_action = menu.addAction("⬇  Télécharger")
+        download_action.setEnabled(has_files)
+        download_action.triggered.connect(self.download_selected)
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def download_selected(self):
+        if not self.profile or not self.url_stack:
+            return
+
+        if (
+            (self.download_worker is not None
+             and self.download_worker.isRunning())
+            or
+            (self.multi_download_worker is not None
+             and self.multi_download_worker.isRunning())
+        ):
+            QMessageBox.information(
+                self,
+                "Téléchargement en cours",
+                "Attends la fin du téléchargement actuel.",
+            )
+            return
+
+        rows = sorted({
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        })
+
+        files = []
+        skipped_directories = 0
+
+        for row in rows:
+            item = self.table.item(row, 0)
+            data = item.data(Qt.ItemDataRole.UserRole)
+
+            if not data:
+                continue
+
+            if data["is_directory"]:
+                skipped_directories += 1
+                continue
+
+            files.append({
+                "url": data["url"],
+                "name": data["name"],
+            })
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun fichier",
+                "Sélectionne au moins un fichier à télécharger.",
+            )
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "Choisir le dossier de destination",
+        )
+        if not destination:
+            return
+
+        # Vérifier les éventuels fichiers déjà présents.
+        existing = [
+            item for item in files
+            if (Path(destination) / Path(item["name"]).name).exists()
+        ]
+
+        skipped_existing = 0
+
+        if existing:
+            answer = QMessageBox.question(
+                self,
+                "Fichiers déjà présents",
+                f"{len(existing)} fichier(s) existent déjà dans "
+                f"le dossier choisi.\n\n"
+                "Oui : remplacer les fichiers existants.\n"
+                "Non : conserver les fichiers existants et les ignorer.\n"
+                "Annuler : abandonner le téléchargement.",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+
+            if answer == QMessageBox.StandardButton.No:
+                existing_names = {
+                    item["name"] for item in existing
+                }
+                files = [
+                    item for item in files
+                    if item["name"] not in existing_names
+                ]
+                skipped_existing = len(existing)
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun téléchargement",
+                "Tous les fichiers sélectionnés existent déjà.",
+            )
+            return
+
+        self.multi_download_skipped = (
+            skipped_existing + skipped_directories
+        )
+
+        self.multi_download_dialog = QProgressDialog(
+            "Préparation du téléchargement…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.multi_download_dialog.setWindowTitle(
+            "Téléchargement multiple"
+        )
+        self.multi_download_dialog.setCancelButton(None)
+        self.multi_download_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.multi_download_dialog.setMinimumDuration(300)
+        self.multi_download_dialog.setValue(0)
+        self.multi_download_dialog.show()
+
+        self.multi_download_worker = MultiDownloadWorker(
+            files,
+            destination,
+            self.profile["username"],
+            self.profile["password"],
+            self,
+        )
+
+        self.multi_download_worker.progress.connect(
+            self.multi_download_progress
+        )
+        self.multi_download_worker.current_file.connect(
+            self.multi_download_current_file
+        )
+        self.multi_download_worker.completed.connect(
+            self.multi_download_completed
+        )
+        self.multi_download_worker.finished.connect(
+            self.multi_download_thread_finished
+        )
+        self.multi_download_worker.start()
+
+        self.status_label.setText(
+            f"Téléchargement de {len(files)} fichier(s)…"
+        )
+
+    def multi_download_progress(self, percent):
+        if self.multi_download_dialog is not None:
+            self.multi_download_dialog.setValue(percent)
+
+    def multi_download_current_file(self, name):
+        if self.multi_download_dialog is not None:
+            self.multi_download_dialog.setLabelText(
+                f"Téléchargement de {name}…"
+            )
+
+    def multi_download_completed(self, results):
+        if self.multi_download_dialog is not None:
+            self.multi_download_dialog.close()
+            self.multi_download_dialog = None
+
+        successes = results["success"]
+        failures = results["failed"]
+        skipped = self.multi_download_skipped
+
+        summary = (
+            f"Téléchargements réussis : {len(successes)}\n"
+            f"Échecs : {len(failures)}\n"
+            f"Éléments ignorés : {skipped}"
+        )
+
+        if failures:
+            details = "\n".join(
+                f"• {name} : {message}"
+                for name, message in failures
+            )
+            summary += f"\n\nDétails des erreurs :\n{details}"
+
+        self.status_label.setText(
+            f"Téléchargement terminé : {len(successes)} réussi(s), "
+            f"{len(failures)} échec(s)."
+        )
+
+        if failures:
+            QMessageBox.warning(
+                self, "Bilan des téléchargements", summary
+            )
+        else:
+            QMessageBox.information(
+                self, "Bilan des téléchargements", summary
+            )
+
+    def multi_download_thread_finished(self):
+        self.multi_download_worker = None
+
     def download_progress(self, percent):
         if self.download_dialog is not None:
             self.download_dialog.setValue(percent)
@@ -778,6 +1115,147 @@ class MainWindow(QMainWindow):
         if len(self.url_stack) > 1:
             self.url_stack.pop()
             self.refresh()
+
+    def import_file(self):
+        if not self.profile or not self.url_stack:
+            QMessageBox.warning(
+                self,
+                "Compte non configuré",
+                "Configure d'abord ton compte NUAGE.",
+            )
+            return
+
+        if (
+            self.upload_worker is not None
+            and self.upload_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Import en cours",
+                "Attends la fin de l'import actuel.",
+            )
+            return
+
+        source, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choisir un fichier à importer",
+            "",
+            "Tous les fichiers (*)",
+        )
+
+        if not source:
+            return
+
+        from pathlib import Path
+
+        filename = Path(source).name
+
+        # Vérifier si un fichier du même nom est déjà affiché.
+        overwrite = False
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+
+            if (
+                data["name"].casefold() == filename.casefold()
+                and not data["is_directory"]
+            ):
+                answer = QMessageBox.question(
+                    self,
+                    "Fichier déjà présent",
+                    f"Le fichier « {filename} » existe déjà dans "
+                    "ce dossier NUAGE.\n\n"
+                    "Veux-tu le remplacer ?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
+                overwrite = True
+                break
+
+        self.upload_dialog = QProgressDialog(
+            f"Envoi de {filename} vers NUAGE…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.upload_dialog.setWindowTitle("Import vers NUAGE")
+        self.upload_dialog.setCancelButton(None)
+        self.upload_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.upload_dialog.setMinimumDuration(300)
+        self.upload_dialog.setValue(0)
+        self.upload_dialog.show()
+
+        self.upload_worker = UploadWorker(
+            source,
+            self.url_stack[-1],
+            self.profile["username"],
+            self.profile["password"],
+            overwrite,
+            self,
+        )
+
+        self.upload_worker.progress.connect(
+            self.upload_progress
+        )
+        self.upload_worker.succeeded.connect(
+            self.upload_succeeded
+        )
+        self.upload_worker.failed.connect(
+            self.upload_failed
+        )
+        self.upload_worker.finished.connect(
+            self.upload_thread_finished
+        )
+        self.upload_worker.start()
+
+    def upload_progress(self, percent):
+        if self.upload_dialog is not None:
+            self.upload_dialog.setValue(percent)
+
+    def upload_succeeded(self, destination_url):
+        if self.upload_dialog is not None:
+            self.upload_dialog.setValue(100)
+            self.upload_dialog.close()
+            self.upload_dialog = None
+
+        self.status_label.setText("✓  Import terminé")
+        self.refresh()
+
+        QMessageBox.information(
+            self,
+            "Import terminé",
+            "Le fichier a bien été envoyé vers NUAGE.",
+        )
+
+    def upload_failed(self, message):
+        if self.upload_dialog is not None:
+            self.upload_dialog.close()
+            self.upload_dialog = None
+
+        self.status_label.setText("L'import a échoué.")
+
+        QMessageBox.warning(
+            self,
+            "Échec de l'import",
+            message,
+        )
+
+    def upload_thread_finished(self):
+        self.upload_worker = None
 
 
 def main():
