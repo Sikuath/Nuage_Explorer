@@ -1,38 +1,33 @@
+import os
+import tempfile
+from pathlib import Path
+from urllib.parse import unquote, urljoin
 import xml.etree.ElementTree as ET
 
 import httpx
 
 
-DAV_NS = "{DAV:}"
-
-
 class WebDAVError(Exception):
-    """Erreur de connexion ou de protocole WebDAV."""
+    """Erreur liée à l'accès WebDAV."""
 
 
-def list_directory(url: str, username: str, password: str) -> list[dict]:
-    """Teste la connexion et retourne le contenu du dossier WebDAV."""
+def list_directory(
+    url: str,
+    username: str,
+    password: str,
+) -> list[dict]:
+    """Liste les fichiers et dossiers d'un répertoire WebDAV."""
     url = url.strip()
 
     if not url.startswith("https://"):
-        raise WebDAVError("L'adresse WebDAV doit utiliser HTTPS.")
+        raise WebDAVError("L'accès WebDAV exige une adresse HTTPS.")
 
     if not username.strip() or not password:
         raise WebDAVError("Identifiant ou mot de passe manquant.")
 
-    body = """<?xml version="1.0" encoding="utf-8"?>
-    <d:propfind xmlns:d="DAV:">
-      <d:prop>
-        <d:displayname/>
-        <d:resourcetype/>
-        <d:getcontentlength/>
-        <d:getlastmodified/>
-      </d:prop>
-    </d:propfind>"""
-
     try:
         with httpx.Client(
-            timeout=25.0,
+            timeout=httpx.Timeout(30.0, connect=15.0),
             follow_redirects=True,
             verify=True,
         ) as client:
@@ -40,87 +35,204 @@ def list_directory(url: str, username: str, password: str) -> list[dict]:
                 "PROPFIND",
                 url,
                 auth=(username, password),
-                headers={
-                    "Depth": "1",
-                    "Content-Type": "application/xml; charset=utf-8",
-                },
-                content=body.encode("utf-8"),
+                headers={"Depth": "1"},
             )
 
-    except httpx.TimeoutException as exc:
-        raise WebDAVError("Délai de connexion dépassé.") from exc
-    except httpx.RequestError as exc:
-        raise WebDAVError(
-            f"Impossible de joindre le serveur : {exc}"
-        ) from exc
+        if response.status_code == 401:
+            raise WebDAVError("Authentification refusée (401).")
+        if response.status_code == 403:
+            raise WebDAVError("Accès interdit (403).")
+        if response.status_code == 404:
+            raise WebDAVError("Répertoire introuvable (404).")
+        if response.status_code != 207:
+            raise WebDAVError(
+                f"Réponse WebDAV inattendue : HTTP {response.status_code}."
+            )
 
-    if response.status_code == 401:
-        raise WebDAVError(
-            "Authentification refusée. Vérifie l'identifiant "
-            "et le mot de passe d'application."
-        )
-
-    if response.status_code == 403:
-        raise WebDAVError(
-            "Accès interdit par le serveur (403)."
-        )
-
-    if response.status_code == 404:
-        raise WebDAVError(
-            "Chemin WebDAV introuvable (404). Vérifie l'adresse."
-        )
-
-    if response.status_code != 207:
-        raise WebDAVError(
-            f"Réponse WebDAV inattendue : HTTP {response.status_code}."
-        )
-
-    try:
         root = ET.fromstring(response.content)
+        entries = []
+
+        for item in root:
+            href_element = item.find("{DAV:}href")
+            if href_element is None or not href_element.text:
+                continue
+
+            href = href_element.text
+            item_url = urljoin(str(response.url), href)
+
+            propstat = item.find("{DAV:}propstat")
+            if propstat is None:
+                continue
+
+            prop = propstat.find("{DAV:}prop")
+            if prop is None:
+                continue
+
+            resource_type = prop.find("{DAV:}resourcetype")
+            is_directory = (
+                resource_type is not None
+                and resource_type.find("{DAV:}collection") is not None
+            )
+
+            name = unquote(href.rstrip("/").split("/")[-1])
+            current_path = url.rstrip("/")
+
+            # Le serveur renvoie aussi le répertoire lui-même :
+            # on l'ignore pour ne garder que son contenu.
+            if item_url.rstrip("/") == current_path:
+                continue
+
+            size_element = prop.find("{DAV:}getcontentlength")
+            size = (
+                int(size_element.text)
+                if size_element is not None
+                and size_element.text
+                else 0
+            )
+
+            modified_element = prop.find("{DAV:}getlastmodified")
+            modified = (
+                modified_element.text
+                if modified_element is not None
+                else ""
+            )
+
+            entries.append(
+                {
+                    "name": name,
+                    "href": href,
+                    "is_directory": is_directory,
+                    "size": size,
+                    "modified": modified,                  
+                }
+            )
+
+        return sorted(
+            entries,
+            key=lambda entry: (
+                not entry["is_directory"],
+                entry["name"].casefold(),
+            ),
+        )
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le délai de connexion à NUAGE est dépassé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(f"Erreur réseau : {exc}") from exc
     except ET.ParseError as exc:
         raise WebDAVError(
-            "La réponse du serveur n'est pas un XML WebDAV valide."
+            "La réponse du serveur WebDAV est illisible."
+        ) from exc
+    except (ValueError, TypeError) as exc:
+        raise WebDAVError(
+            f"Impossible de lire la réponse WebDAV : {exc}"
         ) from exc
 
-    entries = []
 
-    for item in root.findall(f"{DAV_NS}response"):
-        href = item.findtext(f"{DAV_NS}href", default="")
-        prop = item.find(
-            f"{DAV_NS}propstat/{DAV_NS}prop"
-        )
+def download_file(
+    url: str,
+    username: str,
+    password: str,
+    destination: str | Path,
+    progress_callback=None,
+) -> Path:
+    """Télécharge un fichier WebDAV vers un chemin local."""
+    url = url.strip()
+    destination = Path(destination)
 
-        if prop is None:
-            continue
+    if not url.startswith("https://"):
+        raise WebDAVError("Le téléchargement exige une adresse HTTPS.")
 
-        display_name = prop.findtext(
-            f"{DAV_NS}displayname", default=""
-        )
+    if not username.strip() or not password:
+        raise WebDAVError("Identifiant ou mot de passe manquant.")
 
-        resource_type = prop.find(f"{DAV_NS}resourcetype")
-        is_directory = (
-            resource_type is not None
-            and resource_type.find(f"{DAV_NS}collection") is not None
-        )
+    temporary_path = None
 
-        size_text = prop.findtext(
-            f"{DAV_NS}getcontentlength", default=""
-        )
-        modified = prop.findtext(
-            f"{DAV_NS}getlastmodified", default=""
-        )
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            size = int(size_text) if size_text else None
-        except ValueError:
-            size = None
+        with httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=25.0),
+            follow_redirects=True,
+            verify=True,
+        ) as client:
+            with client.stream(
+                "GET",
+                url,
+                auth=(username, password),
+            ) as response:
+                if response.status_code == 401:
+                    raise WebDAVError("Authentification refusée (401).")
+                if response.status_code == 403:
+                    raise WebDAVError("Accès interdit (403).")
+                if response.status_code == 404:
+                    raise WebDAVError("Fichier introuvable (404).")
+                if response.status_code != 200:
+                    raise WebDAVError(
+                        f"Réponse inattendue : HTTP {response.status_code}."
+                    )
 
-        entries.append({
-            "name": display_name or href.rstrip("/").split("/")[-1],
-            "href": href,
-            "is_directory": is_directory,
-            "size": size,
-            "modified": modified,
-        })
+                total = int(
+                    response.headers.get("content-length", 0) or 0
+                )
+                downloaded = 0
+                last_percent = -1
 
-    return entries
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{destination.name}.",
+                    suffix=".part",
+                    dir=destination.parent,
+                    delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+
+                    for chunk in response.iter_bytes(
+                        chunk_size=256 * 1024
+                    ):
+                        if not chunk:
+                            continue
+
+                        temporary.write(chunk)
+                        downloaded += len(chunk)
+
+                        if total > 0 and progress_callback:
+                            percent = min(
+                                100, downloaded * 100 // total
+                            )
+                            if percent != last_percent:
+                                progress_callback(percent)
+                                last_percent = percent
+
+                # Le fichier final n'est remplacé qu'une fois
+                # le téléchargement terminé.
+                os.replace(temporary_path, destination)
+                temporary_path = None
+
+        if progress_callback:
+            progress_callback(100)
+
+        return destination
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le téléchargement a dépassé le délai autorisé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(f"Erreur réseau : {exc}") from exc
+    except OSError as exc:
+        raise WebDAVError(
+            f"Erreur d'écriture sur le PC : {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass

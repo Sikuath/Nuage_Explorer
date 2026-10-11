@@ -2,7 +2,7 @@
 import sys
 from urllib.parse import urljoin, urlsplit
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
+    QProgressDialog,
 )
 
 from vault import (
@@ -34,7 +36,7 @@ from vault import (
     InvalidVaultError,
     VaultError,
 )
-from webdav import list_directory, WebDAVError
+from webdav import list_directory, download_file, WebDAVError
 
 
 STYLE = """
@@ -349,6 +351,31 @@ class ProfileDialog(QDialog):
         self.accept()
 
 
+class DownloadWorker(QThread):
+    progress = Signal(int)
+    succeeded = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url, username, password, destination, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.username = username
+        self.password = password
+        self.destination = destination
+
+    def run(self):
+        try:
+            result = download_file(
+                self.url,
+                self.username,
+                self.password,
+                self.destination,
+                self.progress.emit,
+            )
+            self.succeeded.emit(str(result))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -358,6 +385,10 @@ class MainWindow(QMainWindow):
         self.vault_data = vault_data
         self.profile = self.get_profile()
         self.url_stack = []
+
+        # Références conservées pendant le téléchargement
+        self.download_worker = None
+        self.download_dialog = None
 
         self.setWindowTitle("Nuage Explorer")
         self.resize(1100, 700)
@@ -383,7 +414,6 @@ class MainWindow(QMainWindow):
         brand = QLabel("☁  Nuage Explorer")
         brand.setObjectName("sectionTitle")
         side.addWidget(brand)
-
         side.addSpacing(20)
 
         nav_label = QLabel("ESPACE PERSONNEL")
@@ -419,8 +449,8 @@ class MainWindow(QMainWindow):
         root.addWidget(content, 1)
 
         top = QHBoxLayout()
-
         heading_box = QVBoxLayout()
+
         heading = QLabel("Mes fichiers")
         heading.setObjectName("appTitle")
         heading_box.addWidget(heading)
@@ -428,8 +458,8 @@ class MainWindow(QMainWindow):
         self.subtitle = QLabel("Tes documents, accessibles depuis NUAGE")
         self.subtitle.setObjectName("muted")
         heading_box.addWidget(self.subtitle)
-        top.addLayout(heading_box)
 
+        top.addLayout(heading_box)
         top.addStretch()
 
         self.refresh_button = QPushButton("↻  Actualiser")
@@ -438,7 +468,7 @@ class MainWindow(QMainWindow):
 
         main.addLayout(top)
 
-        # Navigation et chemin courant
+        # Chemin courant et navigation
         path_bar = QHBoxLayout()
         path_bar.setSpacing(8)
 
@@ -478,10 +508,12 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
+
         for column in (1, 2, 3):
             self.table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
+
         self.table.itemDoubleClicked.connect(self.open_item)
         main.addWidget(self.table, 1)
 
@@ -489,6 +521,7 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("status")
         main.addWidget(self.status_label)
 
+        # Connexion initiale
         if self.profile:
             self.url_stack = [self.profile["url"]]
             self.account_label.setText(
@@ -496,7 +529,9 @@ class MainWindow(QMainWindow):
             )
             self.refresh()
         else:
-            self.path_label.setText("Configure ton compte pour commencer")
+            self.path_label.setText(
+                "Configure ton compte pour commencer"
+            )
             self.status_label.setText(
                 "Aucun compte configuré. Ouvre « Compte et connexion »."
             )
@@ -507,6 +542,7 @@ class MainWindow(QMainWindow):
 
     def configure_profile(self):
         dialog = ProfileDialog(self.profile, self)
+
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -529,6 +565,7 @@ class MainWindow(QMainWindow):
         self.vault_data = new_data
         self.profile = new_profile
         self.url_stack = [self.profile["url"]]
+
         self.account_label.setText(
             f"●  Connecté à NUAGE\n{self.profile['username']}"
         )
@@ -575,9 +612,11 @@ class MainWindow(QMainWindow):
             item_url = urljoin(current_url, href)
             parsed = urlsplit(item_url)
 
+            # Ne pas accepter un lien vers un autre serveur.
             if parsed.netloc.lower() != current.netloc.lower():
                 continue
 
+            # Masquer le dossier actuellement ouvert.
             if parsed.path.rstrip("/") == current.path.rstrip("/"):
                 continue
 
@@ -592,6 +631,7 @@ class MainWindow(QMainWindow):
                 kind = "Dossier"
             else:
                 display_name = f"📄   {name}"
+
                 if size is None:
                     size_text = "—"
                 elif size < 1024:
@@ -600,6 +640,7 @@ class MainWindow(QMainWindow):
                     size_text = f"{size / 1024:.1f} Ko"
                 else:
                     size_text = f"{size / (1024 * 1024):.1f} Mo"
+
                 kind = "Fichier"
 
             row = self.table.rowCount()
@@ -614,6 +655,7 @@ class MainWindow(QMainWindow):
                     "name": name,
                 },
             )
+
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, QTableWidgetItem(size_text))
             self.table.setItem(row, 2, QTableWidgetItem(modified))
@@ -629,19 +671,108 @@ class MainWindow(QMainWindow):
         data = self.table.item(item.row(), 0).data(
             Qt.ItemDataRole.UserRole
         )
+
         if not data:
             return
 
         if data["is_directory"]:
             self.url_stack.append(data["url"].rstrip("/") + "/")
             self.refresh()
-        else:
+            return
+
+        # Éviter deux téléchargements simultanés.
+        if (
+            self.download_worker is not None
+            and self.download_worker.isRunning()
+        ):
             QMessageBox.information(
                 self,
-                "Fichier",
-                "La nouvelle interface est prête !\n\n"
-                "Le téléchargement sera ajouté ensuite.",
+                "Téléchargement en cours",
+                "Attends la fin du téléchargement actuel.",
             )
+            return
+
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Télécharger le fichier",
+            data["name"],
+            "Tous les fichiers (*)",
+        )
+
+        if not destination:
+            return
+
+        self.download_dialog = QProgressDialog(
+            f"Téléchargement de {data['name']}…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.download_dialog.setWindowTitle("Téléchargement")
+        self.download_dialog.setCancelButton(None)
+        self.download_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.download_dialog.setMinimumDuration(300)
+        self.download_dialog.setValue(0)
+        self.download_dialog.show()
+
+        self.download_worker = DownloadWorker(
+            data["url"],
+            self.profile["username"],
+            self.profile["password"],
+            destination,
+            self,
+        )
+
+        self.download_worker.progress.connect(
+            self.download_progress
+        )
+        self.download_worker.succeeded.connect(
+            self.download_succeeded
+        )
+        self.download_worker.failed.connect(
+            self.download_failed
+        )
+        self.download_worker.finished.connect(
+            self.download_thread_finished
+        )
+        self.download_worker.start()
+
+    def download_progress(self, percent):
+        if self.download_dialog is not None:
+            self.download_dialog.setValue(percent)
+
+    def download_succeeded(self, destination):
+        if self.download_dialog is not None:
+            self.download_dialog.setValue(100)
+            self.download_dialog.close()
+            self.download_dialog = None
+
+        self.status_label.setText("✓  Téléchargement terminé")
+
+        QMessageBox.information(
+            self,
+            "Téléchargement terminé",
+            f"Fichier enregistré ici :\n\n{destination}",
+        )
+
+    def download_failed(self, message):
+        if self.download_dialog is not None:
+            self.download_dialog.close()
+            self.download_dialog = None
+
+        self.status_label.setText("Le téléchargement a échoué.")
+
+        QMessageBox.warning(
+            self,
+            "Erreur de téléchargement",
+            message,
+        )
+
+    def download_thread_finished(self):
+        self.download_worker = None
 
     def go_up(self):
         if len(self.url_stack) > 1:
