@@ -71,3 +71,7 @@ $RECYCLE.BIN/
 .local/
 settings.local.json
 config.local.json
+# Compilation PyInstaller
+build/
+dist/
+*.spec

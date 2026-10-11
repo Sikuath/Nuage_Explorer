@@ -230,6 +230,12 @@ QTreeWidget::item:selected {
     color: #164e88;
 }
 """
+def application_root() -> Path:
+    """Retourne le dossier du projet ou celui de l'exécutable portable."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    return Path(__file__).resolve().parent.parent
 
 
 def obtain_vault():
@@ -637,7 +643,7 @@ class PreviewWorker(QThread):
         self.profile = profile
 
     def run(self):
-        temp_root = Path(__file__).resolve().parent.parent / "temp"
+        temp_root = application_root() / "temp"
 
         try:
             temp_root.mkdir(parents=True, exist_ok=True)
@@ -2665,7 +2671,7 @@ class MainWindow(QMainWindow):
 
 def clear_preview_temp():
     """Vide le dossier temporaire de Nuage Explorer au démarrage."""
-    temp_root = Path(__file__).resolve().parent.parent / "temp"
+    temp_root = application_root() / "temp"
 
     try:
         temp_root.mkdir(parents=True, exist_ok=True)
