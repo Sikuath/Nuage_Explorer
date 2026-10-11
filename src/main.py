@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMenu,
     QProgressDialog,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 
 from vault import (
@@ -189,6 +191,26 @@ QScrollBar::handle:vertical {
 QScrollBar::add-line:vertical,
 QScrollBar::sub-line:vertical {
     height: 0;
+}
+QTreeWidget {
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 4px;
+}
+
+QTreeWidget::item {
+    padding: 6px 2px;
+    border-radius: 5px;
+}
+
+QTreeWidget::item:hover {
+    background: #dce7f5;
+}
+
+QTreeWidget::item:selected {
+    background: #d2e5ff;
+    color: #164e88;
 }
 """
 
@@ -496,7 +518,7 @@ class MainWindow(QMainWindow):
         # Barre latérale
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(215)
+        sidebar.setFixedWidth(270)
 
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(14, 22, 14, 16)
@@ -517,6 +539,16 @@ class MainWindow(QMainWindow):
         self.home_button.setChecked(True)
         self.home_button.clicked.connect(self.go_home)
         side.addWidget(self.home_button)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(18)
+        self.tree.setAnimated(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.itemExpanded.connect(self.load_tree_children)
+        self.tree.itemClicked.connect(self.tree_item_clicked)
+        side.addWidget(self.tree, 1)
+
+        self.tree_root = None
 
         self.settings_button = QPushButton("⚙   Compte et connexion")
         self.settings_button.setObjectName("navButton")
@@ -626,6 +658,7 @@ class MainWindow(QMainWindow):
         # Connexion initiale
         if self.profile:
             self.url_stack = [self.profile["url"]]
+            self.rebuild_tree()
             self.account_label.setText(
                 f"●  Connecté à NUAGE\n{self.profile['username']}"
             )
@@ -667,7 +700,7 @@ class MainWindow(QMainWindow):
         self.vault_data = new_data
         self.profile = new_profile
         self.url_stack = [self.profile["url"]]
-
+        self.rebuild_tree()
         self.account_label.setText(
             f"●  Connecté à NUAGE\n{self.profile['username']}"
         )
@@ -681,6 +714,115 @@ class MainWindow(QMainWindow):
 
         self.url_stack = [self.profile["url"]]
         self.home_button.setChecked(True)
+        if self.tree_root is not None:
+            self.tree.setCurrentItem(self.tree_root)
+        self.refresh()
+
+
+    def rebuild_tree(self):
+        """Reconstruit la racine de l'arborescence NUAGE."""
+        self.tree.clear()
+        self.tree_root = None
+
+        if not self.profile:
+            return
+
+        root = QTreeWidgetItem(["☁  Mon NUAGE"])
+        root.setData(
+            0, Qt.ItemDataRole.UserRole, self.profile["url"]
+        )
+        root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+
+        self.tree.addTopLevelItem(root)
+        self.tree_root = root
+        root.setExpanded(True)
+
+    def load_tree_children(self, item):
+        """Charge les sous-dossiers à la première ouverture."""
+        loaded = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if loaded:
+            return
+
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+        if not url or not self.profile:
+            return
+
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+        item.takeChildren()
+
+        try:
+            entries = list_directory(
+                url,
+                self.profile["username"],
+                self.profile["password"],
+            )
+        except WebDAVError as exc:
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+            item.addChild(QTreeWidgetItem(["Chargement…"]))
+            self.status_label.setText(
+                "Impossible de charger les sous-dossiers."
+            )
+            QMessageBox.warning(
+                self, "Erreur WebDAV", str(exc)
+            )
+            return
+
+        current = urlsplit(url)
+
+        for entry in entries:
+            href = entry.get("href", "")
+            if not href or not entry.get("is_directory", False):
+                continue
+
+            child_url = urljoin(url, href)
+            parsed = urlsplit(child_url)
+
+            if parsed.netloc.lower() != current.netloc.lower():
+                continue
+
+            if parsed.path.rstrip("/") == current.path.rstrip("/"):
+                continue
+
+            name = entry.get("name") or (
+                parsed.path.rstrip("/").split("/")[-1]
+            )
+
+            child = QTreeWidgetItem([f"📁  {name}"])
+            child.setData(
+                0, Qt.ItemDataRole.UserRole, child_url
+            )
+            child.setData(
+                0, Qt.ItemDataRole.UserRole + 1, False
+            )
+
+            # Le faux enfant permet d'afficher le triangle
+            # même avant le chargement des sous-dossiers.
+            child.addChild(QTreeWidgetItem(["Chargement…"]))
+            item.addChild(child)
+
+    def tree_item_clicked(self, item, column):
+        """Affiche dans le tableau le dossier choisi à gauche."""
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if not url or item.text(0) == "Chargement…":
+            return
+
+        # Reconstruit le chemin de navigation depuis la racine.
+        stack = []
+        current_item = item
+
+        while current_item is not None:
+            current_url = current_item.data(
+                0, Qt.ItemDataRole.UserRole
+            )
+            if current_url:
+                stack.append(current_url.rstrip("/") + "/")
+            current_item = current_item.parent()
+
+        self.url_stack = list(reversed(stack))
+        self.home_button.setChecked(
+            item == self.tree_root
+        )
         self.refresh()
 
     def refresh(self):
@@ -784,8 +926,11 @@ class MainWindow(QMainWindow):
 
         # Éviter deux téléchargements simultanés.
         if (
-            self.download_worker is not None
-            and self.download_worker.isRunning()
+            (self.download_worker is not None
+             and self.download_worker.isRunning())
+            or
+            (self.multi_download_worker is not None
+             and self.multi_download_worker.isRunning())
         ):
             QMessageBox.information(
                 self,
