@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from urllib.parse import unquote, urljoin
+from urllib.parse import quote, unquote, urljoin, urlsplit
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -502,3 +502,206 @@ def create_directory(
         raise WebDAVError(
             f"Erreur réseau pendant la création : {exc}"
         ) from exc
+
+def _transfer_resource(
+    method: str,
+    source_url: str,
+    destination_url: str,
+    username: str,
+    password: str,
+    overwrite: bool = False,
+    is_directory: bool = False,
+) -> str:
+    """Copie ou déplace une ressource directement sur le serveur WebDAV."""
+
+    source_url = source_url.strip()
+    destination_url = destination_url.strip()
+
+    if not source_url.startswith("https://"):
+        raise WebDAVError("La source doit utiliser HTTPS.")
+
+    if not destination_url.startswith("https://"):
+        raise WebDAVError("La destination doit utiliser HTTPS.")
+
+    if not username.strip() or not password:
+        raise WebDAVError("Identifiant ou mot de passe manquant.")
+
+    source = urlsplit(source_url)
+    destination = urlsplit(destination_url)
+
+    if source.netloc.lower() != destination.netloc.lower():
+        raise WebDAVError(
+            "La source et la destination doivent appartenir "
+            "au même serveur."
+        )
+
+    if source_url.rstrip("/") == destination_url.rstrip("/"):
+        raise WebDAVError(
+            "La source et la destination sont identiques."
+        )
+
+    headers = {
+        "Destination": destination_url,
+        "Overwrite": "T" if overwrite else "F",
+    }
+
+    # Une collection doit être copiée avec son contenu.
+    if method == "COPY" and is_directory:
+        headers["Depth"] = "infinity"
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(60.0, connect=25.0),
+            follow_redirects=True,
+            verify=True,
+        ) as client:
+            response = client.request(
+                method,
+                source_url,
+                auth=(username, password),
+                headers=headers,
+            )
+
+        if response.status_code == 401:
+            raise WebDAVError("Authentification refusée (401).")
+
+        if response.status_code == 403:
+            raise WebDAVError(
+                "Opération interdite par le serveur (403)."
+            )
+
+        if response.status_code == 404:
+            raise WebDAVError(
+                "La source ou la destination est introuvable (404)."
+            )
+
+        if response.status_code == 405:
+            raise WebDAVError(
+                "Cette opération n'est pas autorisée sur cette ressource (405)."
+            )
+
+        if response.status_code == 409:
+            raise WebDAVError(
+                "Destination invalide : le dossier parent n'existe pas "
+                "ou l'opération est incompatible avec l'arborescence (409)."
+            )
+
+        if response.status_code == 412:
+            raise WebDAVError(
+                "Un élément portant déjà ce nom existe dans la destination."
+            )
+
+        if response.status_code == 423:
+            raise WebDAVError("La ressource est verrouillée (423).")
+
+        if response.status_code == 507:
+            raise WebDAVError(
+                "Espace de stockage NUAGE insuffisant (507)."
+            )
+
+        if response.status_code not in (200, 201, 202, 204):
+            raise WebDAVError(
+                f"Échec de l'opération WebDAV : "
+                f"HTTP {response.status_code}."
+            )
+
+        return destination_url
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le délai de l'opération WebDAV est dépassé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(
+            f"Erreur réseau pendant l'opération WebDAV : {exc}"
+        ) from exc
+
+
+def copy_resource(
+    source_url: str,
+    destination_url: str,
+    username: str,
+    password: str,
+    overwrite: bool = False,
+    is_directory: bool = False,
+) -> str:
+    """Copie un fichier ou un dossier sur NUAGE."""
+    return _transfer_resource(
+        "COPY",
+        source_url,
+        destination_url,
+        username,
+        password,
+        overwrite=overwrite,
+        is_directory=is_directory,
+    )
+
+
+def move_resource(
+    source_url: str,
+    destination_url: str,
+    username: str,
+    password: str,
+    overwrite: bool = False,
+    is_directory: bool = False,
+) -> str:
+    """Déplace un fichier ou un dossier sur NUAGE."""
+    return _transfer_resource(
+        "MOVE",
+        source_url,
+        destination_url,
+        username,
+        password,
+        overwrite=overwrite,
+        is_directory=is_directory,
+    )
+
+
+def rename_resource(
+    source_url: str,
+    new_name: str,
+    username: str,
+    password: str,
+    is_directory: bool = False,
+) -> str:
+    """Renomme un fichier ou un dossier sans le télécharger."""
+
+    new_name = new_name.strip()
+
+    if (
+        not new_name
+        or new_name in (".", "..")
+        or "/" in new_name
+        or "\\" in new_name
+        or any(ord(char) < 32 for char in new_name)
+    ):
+        raise WebDAVError("Nom de fichier ou de dossier invalide.")
+
+    source = urlsplit(source_url)
+    source_path = source.path.rstrip("/")
+
+    if not source_path or "/" not in source_path:
+        raise WebDAVError("Impossible de déterminer le dossier parent.")
+
+    parent_path = source_path.rsplit("/", 1)[0] + "/"
+    destination_path = parent_path + quote(new_name, safe="")
+
+    if is_directory:
+        destination_path += "/"
+
+    destination_url = source._replace(
+        path=destination_path,
+        query="",
+        fragment="",
+    ).geturl()
+
+    return move_resource(
+        source_url,
+        destination_url,
+        username,
+        password,
+        overwrite=False,
+        is_directory=is_directory,
+    )

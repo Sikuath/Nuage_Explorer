@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -45,6 +45,9 @@ from webdav import (
     upload_file,
     delete_file,
     create_directory,
+    copy_resource,
+    move_resource,
+    rename_resource,
     WebDAVError,
 )
 
@@ -577,6 +580,189 @@ class DeleteWorker(QThread):
         self.completed.emit(results)
 
 
+class RemoteFolderDialog(QDialog):
+    """Permet de choisir un dossier de destination sur NUAGE."""
+
+    def __init__(self, profile, parent=None):
+        super().__init__(parent)
+
+        self.profile = profile
+        self.destination_url = None
+
+        self.setWindowTitle("Choisir un dossier NUAGE")
+        self.resize(480, 520)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Sélectionne le dossier de destination :"))
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(18)
+        self.tree.itemExpanded.connect(self.load_children)
+        layout.addWidget(self.tree)
+
+        root = QTreeWidgetItem(["☁  Mon NUAGE"])
+        root.setData(0, Qt.ItemDataRole.UserRole, profile["url"])
+        root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+        root.addChild(QTreeWidgetItem(["Chargement…"]))
+
+        self.tree.addTopLevelItem(root)
+        self.tree.setCurrentItem(root)
+        root.setExpanded(True)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Choisir ce dossier"
+        )
+        buttons.accepted.connect(self.accept_selection)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def load_children(self, item):
+        """Charge les sous-dossiers lorsque l'utilisateur développe un dossier."""
+        if item.data(0, Qt.ItemDataRole.UserRole + 1):
+            return
+
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+        if not url:
+            return
+
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+        item.takeChildren()
+
+        try:
+            entries = list_directory(
+                url,
+                self.profile["username"],
+                self.profile["password"],
+            )
+        except WebDAVError as exc:
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+            item.addChild(QTreeWidgetItem(["Chargement…"]))
+            QMessageBox.warning(
+                self,
+                "Erreur WebDAV",
+                str(exc),
+            )
+            return
+
+        current = urlsplit(url)
+
+        for entry in entries:
+            if not entry.get("is_directory", False):
+                continue
+
+            href = entry.get("href", "")
+            if not href:
+                continue
+
+            child_url = urljoin(url, href)
+            parsed = urlsplit(child_url)
+
+            # Ne pas sortir du serveur NUAGE ni réafficher le dossier courant.
+            if parsed.netloc.lower() != current.netloc.lower():
+                continue
+
+            if parsed.path.rstrip("/") == current.path.rstrip("/"):
+                continue
+
+            if not child_url.endswith("/"):
+                child_url += "/"
+
+            name = entry.get("name") or parsed.path.rstrip("/").split("/")[-1]
+
+            child = QTreeWidgetItem([f"📁  {name}"])
+            child.setData(0, Qt.ItemDataRole.UserRole, child_url)
+            child.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+            child.addChild(QTreeWidgetItem(["Chargement…"]))
+            item.addChild(child)
+
+    def accept_selection(self):
+        item = self.tree.currentItem()
+
+        if item is None:
+            QMessageBox.warning(
+                self,
+                "Aucun dossier",
+                "Sélectionne un dossier de destination.",
+            )
+            return
+
+        url = item.data(0, Qt.ItemDataRole.UserRole)
+        if not url:
+            return
+
+        self.destination_url = url.rstrip("/") + "/"
+        self.accept()
+
+
+class ResourceOperationWorker(QThread):
+    """Exécute les copies, déplacements et renommages sans bloquer l'interface."""
+
+    progress = Signal(int, str)
+    completed = Signal(dict)
+
+    def __init__(self, operations, username, password, parent=None):
+        super().__init__(parent)
+        self.operations = operations
+        self.username = username
+        self.password = password
+
+    def run(self):
+        results = {
+            "success": [],
+            "failed": [],
+        }
+
+        total = len(self.operations)
+
+        for index, operation in enumerate(self.operations):
+            name = operation["name"]
+            self.progress.emit(
+                int(index * 100 / total),
+                name,
+            )
+
+            try:
+                if operation["operation"] == "rename":
+                    rename_resource(
+                        operation["url"],
+                        operation["new_name"],
+                        self.username,
+                        self.password,
+                        is_directory=operation["is_directory"],
+                    )
+                else:
+                    transfer_function = (
+                        copy_resource
+                        if operation["operation"] == "copy"
+                        else move_resource
+                    )
+
+                    transfer_function(
+                        operation["url"],
+                        operation["destination_url"],
+                        self.username,
+                        self.password,
+                        overwrite=False,
+                        is_directory=operation["is_directory"],
+                    )
+
+                results["success"].append(name)
+
+            except Exception as exc:
+                results["failed"].append((name, str(exc)))
+
+            self.progress.emit(
+                int((index + 1) * 100 / total),
+                name,
+            )
+
+        self.completed.emit(results)
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -598,8 +784,16 @@ class MainWindow(QMainWindow):
         self.multi_download_dialog = None
         self.delete_worker = None
         self.delete_dialog = None
-        self.multi_download_skipped = 0
+        self.transfer_worker = None
+        self.transfer_dialog = None
+        self.transfer_action_label = "Opération WebDAV"
 
+        # Presse-papiers interne à Nuage Explorer.
+        self.clipboard_items = []
+        self.clipboard_mode = None
+        self.clear_clipboard_after_transfer = False
+        self.multi_download_skipped = 0
+        
         self.setWindowTitle("Nuage Explorer")
         self.resize(1100, 700)
         self.setMinimumSize(800, 500)
@@ -1040,50 +1234,470 @@ class MainWindow(QMainWindow):
 
 
     def show_context_menu(self, position):
-        item = self.table.itemAt(position)
-        if item is None:
-            return
+        clicked_item = self.table.itemAt(position)
 
-        row = item.row()
-        selected_rows = {
-            index.row() for index in self.table.selectionModel().selectedRows()
-        }
+        if clicked_item is not None:
+            selected_rows = {
+                index.row()
+                for index in self.table.selectionModel().selectedRows()
+            }
 
-        if row not in selected_rows:
+            if clicked_item.row() not in selected_rows:
+                self.table.clearSelection()
+                self.table.selectRow(clicked_item.row())
+        else:
             self.table.clearSelection()
-            self.table.selectRow(row)
 
-        selected_rows = sorted(
-            {index.row() for index in self.table.selectionModel().selectedRows()}
+        items = self.selected_remote_items()
+
+        has_items = bool(items)
+        has_files = any(
+            not item["is_directory"]
+            for item in items
         )
-
-        has_files = False
-        has_items = False
-
-        for selected_row in selected_rows:
-            name_item = self.table.item(selected_row, 0)
-            if name_item is None:
-                continue
-
-            data = name_item.data(Qt.ItemDataRole.UserRole)
-
-            if data:
-                has_items = True
-                if not data["is_directory"]:
-                    has_files = True
+        single_item = len(items) == 1
 
         menu = QMenu(self)
+
+        # Groupe 1 : ouvrir
+        open_action = menu.addAction("📂  Ouvrir")
+        open_action.setEnabled(single_item)
+        open_action.triggered.connect(self.open_selected)
+
+        menu.addSeparator()
+
+        # Groupe 2 : presse-papiers et transferts
+        cut_action = menu.addAction("✂  Couper")
+        cut_action.setEnabled(has_items)
+        cut_action.triggered.connect(self.cut_selected)
+
+        copy_action = menu.addAction("📋  Copier")
+        copy_action.setEnabled(has_items)
+        copy_action.triggered.connect(self.copy_selected)
+
+        move_action = menu.addAction("Déplacer vers…")
+        move_action.setEnabled(has_items)
+        move_action.triggered.connect(
+            lambda checked=False: self.transfer_selected_to("move")
+        )
+
+        copy_to_action = menu.addAction("Copier vers…")
+        copy_to_action.setEnabled(has_items)
+        copy_to_action.triggered.connect(
+            lambda checked=False: self.transfer_selected_to("copy")
+        )
+
+        menu.addSeparator()
+
+        # Groupe 3 : gestion des éléments
+        rename_action = menu.addAction("Renommer")
+        rename_action.setEnabled(single_item)
+        rename_action.triggered.connect(self.rename_selected)
+
+        paste_action = menu.addAction("Coller dans le dossier")
+        paste_action.setEnabled(bool(self.clipboard_items))
+        paste_action.triggered.connect(self.paste_into_current_folder)
+
+        menu.addSeparator()
+
+        # Groupe 4 : suppression et téléchargement
+        delete_action = menu.addAction("🗑  Supprimer")
+        delete_action.setEnabled(has_items)
+        delete_action.triggered.connect(self.delete_selected)
 
         download_action = menu.addAction("⬇  Télécharger")
         download_action.setEnabled(has_files)
         download_action.triggered.connect(self.download_selected)
 
-        delete_action = menu.addAction("🗑  Supprimer")
-        delete_action.setEnabled(has_items)
-        delete_action.triggered.connect(self.delete_selected)
+        menu.exec(
+            self.table.viewport().mapToGlobal(position)
+        )
 
-        menu.exec(self.table.viewport().mapToGlobal(position))
+    def selected_remote_items(self):
+        """Retourne les éléments sélectionnés dans le tableau."""
+        rows = sorted({
+            index.row()
+            for index in self.table.selectionModel().selectedRows()
+        })
 
+        items = []
+
+        for row in rows:
+            name_item = self.table.item(row, 0)
+            if name_item is None:
+                continue
+
+            data = name_item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                items.append(dict(data))
+
+        return items
+
+    def open_selected(self):
+        items = self.selected_remote_items()
+
+        if len(items) != 1:
+            return
+
+        rows = self.table.selectionModel().selectedRows()
+        if rows:
+            self.open_item(self.table.item(rows[0].row(), 0))
+
+    def cut_selected(self):
+        items = self.selected_remote_items()
+        if not items:
+            return
+
+        self.clipboard_items = items
+        self.clipboard_mode = "move"
+
+        self.status_label.setText(
+            f"{len(items)} élément(s) coupé(s) : prêts à être déplacés."
+        )
+
+    def copy_selected(self):
+        items = self.selected_remote_items()
+        if not items:
+            return
+
+        self.clipboard_items = items
+        self.clipboard_mode = "copy"
+
+        self.status_label.setText(
+            f"{len(items)} élément(s) copié(s) dans le presse-papiers interne."
+        )
+
+    def build_transfer_operations(self, items, destination_folder_url, mode):
+        """Prépare les opérations en vérifiant les destinations dangereuses."""
+        destination_folder_url = destination_folder_url.rstrip("/") + "/"
+        operations = []
+
+        for item in items:
+            target_url = urljoin(
+                destination_folder_url,
+                quote(item["name"], safe=""),
+            )
+
+            if item["is_directory"]:
+                target_url = target_url.rstrip("/") + "/"
+
+            source = urlsplit(item["url"])
+            target = urlsplit(target_url)
+
+            if source.netloc.lower() != target.netloc.lower():
+                QMessageBox.warning(
+                    self,
+                    "Destination invalide",
+                    "La source et la destination doivent être sur le même serveur.",
+                )
+                return None
+
+            source_path = source.path.rstrip("/")
+            target_path = target.path.rstrip("/")
+
+            if source_path == target_path:
+                QMessageBox.warning(
+                    self,
+                    "Destination invalide",
+                    f"« {item['name']} » est déjà dans ce dossier "
+                    "ou porte déjà ce nom à cet emplacement.",
+                )
+                return None
+
+            if (
+                item["is_directory"]
+                and target_path.startswith(source_path + "/")
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Destination invalide",
+                    f"Impossible de copier ou déplacer « {item['name']} » "
+                    "dans lui-même ou dans l'un de ses sous-dossiers.",
+                )
+                return None
+
+            operations.append({
+                "operation": mode,
+                "url": item["url"],
+                "destination_url": target_url,
+                "name": item["name"],
+                "is_directory": item["is_directory"],
+            })
+
+        return operations
+
+    def transfer_selected_to(self, mode):
+        """Ouvre le sélecteur de destination pour copier ou déplacer."""
+        items = self.selected_remote_items()
+        if not items:
+            return
+
+        if (
+            self.transfer_worker is not None
+            and self.transfer_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Opération en cours",
+                "Attends la fin de l'opération WebDAV actuelle.",
+            )
+            return
+
+        dialog = RemoteFolderDialog(self.profile, self)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        operations = self.build_transfer_operations(
+            items,
+            dialog.destination_url,
+            mode,
+        )
+
+        if operations is None or not operations:
+            return
+
+        label = (
+            "Copie sur NUAGE"
+            if mode == "copy"
+            else "Déplacement sur NUAGE"
+        )
+
+        self.start_resource_operations(operations, label)
+
+    def paste_into_current_folder(self):
+        """Colle les éléments du presse-papiers dans le dossier ouvert."""
+        if (
+            not self.profile
+            or not self.url_stack
+            or not self.clipboard_items
+            or self.clipboard_mode not in ("copy", "move")
+        ):
+            return
+
+        if (
+            self.transfer_worker is not None
+            and self.transfer_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Opération en cours",
+                "Attends la fin de l'opération WebDAV actuelle.",
+            )
+            return
+
+        destination = self.url_stack[-1]
+
+        operations = self.build_transfer_operations(
+            self.clipboard_items,
+            destination,
+            self.clipboard_mode,
+        )
+
+        if operations is None or not operations:
+            return
+
+        label = (
+            "Copie dans le dossier courant"
+            if self.clipboard_mode == "copy"
+            else "Déplacement dans le dossier courant"
+        )
+
+        self.start_resource_operations(
+            operations,
+            label,
+            clear_clipboard=(self.clipboard_mode == "move"),
+        )
+
+    def rename_selected(self):
+        """Renomme un seul fichier ou dossier sur le serveur."""
+        items = self.selected_remote_items()
+
+        if len(items) != 1:
+            return
+
+        item = items[0]
+        current_name = item["name"]
+
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Renommer",
+            "Nouveau nom :",
+            QLineEdit.EchoMode.Normal,
+            current_name,
+        )
+
+        if not ok:
+            return
+
+        new_name = new_name.strip()
+
+        if not new_name or new_name == current_name:
+            return
+
+        if (
+            new_name in (".", "..")
+            or "/" in new_name
+            or "\\" in new_name
+            or any(ord(char) < 32 for char in new_name)
+        ):
+            QMessageBox.warning(
+                self,
+                "Nom invalide",
+                "Le nom ne doit pas contenir de barre oblique "
+                "ni de caractère de contrôle.",
+            )
+            return
+
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is None:
+                continue
+
+            data = name_item.data(Qt.ItemDataRole.UserRole)
+            if not data or data["url"] == item["url"]:
+                continue
+
+            if data["name"].casefold() == new_name.casefold():
+                QMessageBox.warning(
+                    self,
+                    "Nom déjà utilisé",
+                    "Un fichier ou un dossier porte déjà ce nom.",
+                )
+                return
+
+        operations = [{
+            "operation": "rename",
+            "url": item["url"],
+            "name": current_name,
+            "new_name": new_name,
+            "is_directory": item["is_directory"],
+        }]
+
+        self.start_resource_operations(
+            operations,
+            "Renommage sur NUAGE",
+        )
+
+    def start_resource_operations(
+        self,
+        operations,
+        action_label,
+        clear_clipboard=False,
+    ):
+        """Lance les opérations sur un thread séparé."""
+        if not operations:
+            return
+
+        if (
+            self.transfer_worker is not None
+            and self.transfer_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Opération en cours",
+                "Attends la fin de l'opération WebDAV actuelle.",
+            )
+            return
+
+        self.transfer_action_label = action_label
+        self.clear_clipboard_after_transfer = clear_clipboard
+
+        self.transfer_dialog = QProgressDialog(
+            f"{action_label}…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.transfer_dialog.setWindowTitle("Nuage Explorer")
+        self.transfer_dialog.setCancelButton(None)
+        self.transfer_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.transfer_dialog.setMinimumDuration(300)
+        self.transfer_dialog.setValue(0)
+        self.transfer_dialog.show()
+
+        self.transfer_worker = ResourceOperationWorker(
+            operations,
+            self.profile["username"],
+            self.profile["password"],
+            self,
+        )
+
+        self.transfer_worker.progress.connect(
+            self.resource_operation_progress
+        )
+        self.transfer_worker.completed.connect(
+            self.resource_operation_completed
+        )
+        self.transfer_worker.finished.connect(
+            self.resource_operation_thread_finished
+        )
+        self.transfer_worker.start()
+
+    def resource_operation_progress(self, percent, name):
+        if self.transfer_dialog is not None:
+            self.transfer_dialog.setLabelText(
+                f"{self.transfer_action_label} : {name}…"
+            )
+            self.transfer_dialog.setValue(percent)
+
+    def resource_operation_completed(self, results):
+        if self.transfer_dialog is not None:
+            self.transfer_dialog.setValue(100)
+            self.transfer_dialog.close()
+            self.transfer_dialog = None
+
+        successes = results["success"]
+        failures = results["failed"]
+
+        # Actualise le tableau et l'arborescence après les changements.
+        self.rebuild_tree()
+        self.refresh()
+
+        summary = (
+            f"Opérations réussies : {len(successes)}\n"
+            f"Échecs : {len(failures)}"
+        )
+
+        if failures:
+            details = "\n".join(
+                f"• {name} : {message}"
+                for name, message in failures
+            )
+            summary += f"\n\nDétails des erreurs :\n{details}"
+
+        if (
+            self.clear_clipboard_after_transfer
+            and not failures
+        ):
+            self.clipboard_items = []
+            self.clipboard_mode = None
+
+        self.clear_clipboard_after_transfer = False
+
+        self.status_label.setText(
+            f"{self.transfer_action_label} terminé : "
+            f"{len(successes)} réussite(s), {len(failures)} échec(s)."
+        )
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Bilan des opérations",
+                summary,
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Bilan des opérations",
+                summary,
+            )
+
+    def resource_operation_thread_finished(self):
+        self.transfer_worker = None
 
     def delete_selected(self):
         if not self.profile or not self.url_stack:
