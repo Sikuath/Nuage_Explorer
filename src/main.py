@@ -484,6 +484,65 @@ class UploadWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
 
+class MultiUploadWorker(QThread):
+    progress = Signal(int)
+    current_file = Signal(str)
+    completed = Signal(dict)
+
+    def __init__(
+        self,
+        files,
+        destination_url,
+        username,
+        password,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.files = files
+        self.destination_url = destination_url
+        self.username = username
+        self.password = password
+
+    def run(self):
+        results = {
+            "success": [],
+            "failed": [],
+        }
+
+        total = len(self.files)
+
+        for index, file in enumerate(self.files):
+            name = file["name"]
+            self.current_file.emit(name)
+
+            def update_progress(percent, index=index):
+                overall = int(
+                    (index + percent / 100) / total * 100
+                )
+                self.progress.emit(overall)
+
+            try:
+                upload_file(
+                    file["source"],
+                    self.destination_url,
+                    self.username,
+                    self.password,
+                    update_progress,
+                    overwrite=file["overwrite"],
+                )
+                results["success"].append(name)
+
+            except Exception as exc:
+                results["failed"].append(
+                    (name, str(exc))
+                )
+
+            self.progress.emit(
+                int((index + 1) / total * 100)
+            )
+
+        self.completed.emit(results)
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -499,6 +558,8 @@ class MainWindow(QMainWindow):
         self.download_dialog = None
         self.upload_worker = None
         self.upload_dialog = None
+        self.multi_upload_worker = None
+        self.multi_upload_dialog = None
         self.multi_download_worker = None
         self.multi_download_dialog = None
         self.multi_download_skipped = 0
@@ -585,7 +646,7 @@ class MainWindow(QMainWindow):
         top.addLayout(heading_box)
         top.addStretch()
 
-        self.upload_button = QPushButton("↑  Importer un fichier")
+        self.upload_button = QPushButton("↑  Importer des fichiers")
         self.upload_button.setObjectName("primary")
         self.upload_button.clicked.connect(self.import_file)
         top.addWidget(self.upload_button)
@@ -1260,7 +1321,7 @@ class MainWindow(QMainWindow):
         if len(self.url_stack) > 1:
             self.url_stack.pop()
             self.refresh()
-
+    
     def import_file(self):
         if not self.profile or not self.url_stack:
             QMessageBox.warning(
@@ -1273,6 +1334,9 @@ class MainWindow(QMainWindow):
         if (
             self.upload_worker is not None
             and self.upload_worker.isRunning()
+        ) or (
+            self.multi_upload_worker is not None
+            and self.multi_upload_worker.isRunning()
         ):
             QMessageBox.information(
                 self,
@@ -1281,91 +1345,172 @@ class MainWindow(QMainWindow):
             )
             return
 
-        source, _ = QFileDialog.getOpenFileName(
+        sources, _ = QFileDialog.getOpenFileNames(
             self,
-            "Choisir un fichier à importer",
+            "Choisir les fichiers à importer",
             "",
             "Tous les fichiers (*)",
         )
 
-        if not source:
+        if not sources:
             return
 
-        from pathlib import Path
+        files = []
+        existing_names = {
+            self.table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )["name"].casefold()
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0) is not None
+            and self.table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )
+            and not self.table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )["is_directory"]
+        }
 
-        filename = Path(source).name
+        overwrite_all = False
+        skip_all = False
 
-        # Vérifier si un fichier du même nom est déjà affiché.
-        overwrite = False
+        for source in sources:
+            filename = Path(source).name
+            overwrite = False
 
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item is None:
-                continue
-
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if not data:
-                continue
-
-            if (
-                data["name"].casefold() == filename.casefold()
-                and not data["is_directory"]
-            ):
+            if filename.casefold() in existing_names:
                 answer = QMessageBox.question(
                     self,
                     "Fichier déjà présent",
-                    f"Le fichier « {filename} » existe déjà dans "
-                    "ce dossier NUAGE.\n\n"
-                    "Veux-tu le remplacer ?",
+                    f"Le fichier « {filename} » existe déjà "
+                    "dans ce dossier NUAGE.\n\n"
+                    "Oui : remplacer ce fichier.\n"
+                    "Non : ignorer ce fichier.\n"
+                    "Annuler : abandonner tout l'import.",
                     QMessageBox.StandardButton.Yes
-                    | QMessageBox.StandardButton.No,
+                    | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.No,
                 )
 
-                if answer != QMessageBox.StandardButton.Yes:
+                if answer == QMessageBox.StandardButton.Cancel:
                     return
 
-                overwrite = True
-                break
+                if answer == QMessageBox.StandardButton.No:
+                    continue
 
-        self.upload_dialog = QProgressDialog(
-            f"Envoi de {filename} vers NUAGE…",
+                overwrite = True
+
+            files.append({
+                "source": source,
+                "name": filename,
+                "overwrite": overwrite,
+            })
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun fichier à importer",
+                "Aucun fichier n'a été retenu pour l'envoi.",
+            )
+            return
+
+        self.multi_upload_dialog = QProgressDialog(
+            "Préparation de l'envoi…",
             None,
             0,
             100,
             self,
         )
-        self.upload_dialog.setWindowTitle("Import vers NUAGE")
-        self.upload_dialog.setCancelButton(None)
-        self.upload_dialog.setWindowModality(
+        self.multi_upload_dialog.setWindowTitle(
+            "Import multiple vers NUAGE"
+        )
+        self.multi_upload_dialog.setCancelButton(None)
+        self.multi_upload_dialog.setWindowModality(
             Qt.WindowModality.WindowModal
         )
-        self.upload_dialog.setMinimumDuration(300)
-        self.upload_dialog.setValue(0)
-        self.upload_dialog.show()
+        self.multi_upload_dialog.setMinimumDuration(300)
+        self.multi_upload_dialog.setValue(0)
+        self.multi_upload_dialog.show()
 
-        self.upload_worker = UploadWorker(
-            source,
+        self.multi_upload_worker = MultiUploadWorker(
+            files,
             self.url_stack[-1],
             self.profile["username"],
             self.profile["password"],
-            overwrite,
             self,
         )
 
-        self.upload_worker.progress.connect(
-            self.upload_progress
+        self.multi_upload_worker.progress.connect(
+            self.multi_upload_progress
         )
-        self.upload_worker.succeeded.connect(
-            self.upload_succeeded
+        self.multi_upload_worker.current_file.connect(
+            self.multi_upload_current_file
         )
-        self.upload_worker.failed.connect(
-            self.upload_failed
+        self.multi_upload_worker.completed.connect(
+            self.multi_upload_completed
         )
-        self.upload_worker.finished.connect(
-            self.upload_thread_finished
+        self.multi_upload_worker.finished.connect(
+            self.multi_upload_thread_finished
         )
-        self.upload_worker.start()
+        self.multi_upload_worker.start()
+
+        self.status_label.setText(
+            f"Envoi de {len(files)} fichier(s) vers NUAGE…"
+        )
+
+
+    def multi_upload_progress(self, percent):
+        if self.multi_upload_dialog is not None:
+            self.multi_upload_dialog.setValue(percent)
+
+    def multi_upload_current_file(self, name):
+        if self.multi_upload_dialog is not None:
+            self.multi_upload_dialog.setLabelText(
+                f"Envoi de {name} vers NUAGE…"
+            )
+
+    def multi_upload_completed(self, results):
+        if self.multi_upload_dialog is not None:
+            self.multi_upload_dialog.setValue(100)
+            self.multi_upload_dialog.close()
+            self.multi_upload_dialog = None
+
+        successes = results["success"]
+        failures = results["failed"]
+
+        summary = (
+            f"Envois réussis : {len(successes)}\n"
+            f"Échecs : {len(failures)}"
+        )
+
+        if failures:
+            details = "\n".join(
+                f"• {name} : {message}"
+                for name, message in failures
+            )
+            summary += f"\n\nDétails des erreurs :\n{details}"
+
+        self.refresh()
+        self.status_label.setText(
+            f"Import terminé : {len(successes)} réussi(s), "
+            f"{len(failures)} échec(s)."
+        )
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Bilan des imports",
+                summary,
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Bilan des imports",
+                summary,
+            )
+
+    def multi_upload_thread_finished(self):
+        self.multi_upload_worker = None
 
     def upload_progress(self, percent):
         if self.upload_dialog is not None:
