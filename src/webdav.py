@@ -411,3 +411,94 @@ def delete_file(
         raise WebDAVError(
             f"Erreur réseau pendant la suppression : {exc}"
         ) from exc
+
+def create_directory(
+    parent_url: str,
+    name: str,
+    username: str,
+    password: str,
+) -> str:
+    """Crée un nouveau dossier dans un répertoire WebDAV."""
+    from urllib.parse import quote, urljoin
+
+    parent_url = parent_url.strip()
+    name = name.strip()
+
+    if not parent_url.startswith("https://"):
+        raise WebDAVError(
+            "La création exige une adresse HTTPS."
+        )
+
+    if not username.strip() or not password:
+        raise WebDAVError(
+            "Identifiant ou mot de passe manquant."
+        )
+
+    if (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or any(ord(char) < 32 for char in name)
+    ):
+        raise WebDAVError(
+            "Nom de dossier invalide. "
+            "Choisis un nom sans barre oblique."
+        )
+
+    target_url = urljoin(
+        parent_url.rstrip("/") + "/",
+        quote(name, safe=""),
+    )
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(30.0, connect=15.0),
+            follow_redirects=True,
+            verify=True,
+        ) as client:
+            response = client.request(
+                "MKCOL",
+                target_url,
+                auth=(username, password),
+            )
+
+        if response.status_code == 201:
+            return target_url
+
+        if response.status_code == 401:
+            raise WebDAVError(
+                "Authentification refusée (401)."
+            )
+        if response.status_code == 403:
+            raise WebDAVError(
+                "Création de dossier interdite (403)."
+            )
+        if response.status_code == 405:
+            raise WebDAVError(
+                "Un fichier ou un dossier porte déjà ce nom."
+            )
+        if response.status_code == 409:
+            raise WebDAVError(
+                "Le dossier parent n'existe pas ou ne permet "
+                "pas cette création (409)."
+            )
+        if response.status_code == 507:
+            raise WebDAVError(
+                "Espace de stockage NUAGE insuffisant (507)."
+            )
+
+        raise WebDAVError(
+            f"Échec de création : HTTP {response.status_code}."
+        )
+
+    except WebDAVError:
+        raise
+    except httpx.TimeoutException as exc:
+        raise WebDAVError(
+            "Le délai de création du dossier est dépassé."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise WebDAVError(
+            f"Erreur réseau pendant la création : {exc}"
+        ) from exc
