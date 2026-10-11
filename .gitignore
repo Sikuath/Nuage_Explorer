@@ -1,0 +1,73 @@
+# Environnements Python
+.venv/
+venv/
+env/
+ENV/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Compilation et distribution
+build/
+dist/
+*.egg-info/
+
+# Coffre, données et bases locales
+data/
+*.vault
+*.vault.*
+*.enc
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets et authentification
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+credentials.json
+secrets.json
+token.json
+tokens.json
+auth.json
+
+# Journaux et temporaires
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+backup/
+backups/
+exports/
+downloads/
+temp/
+tmp/
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Configuration locale
+.local/
+settings.local.json
+config.local.json
