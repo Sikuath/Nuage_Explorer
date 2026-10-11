@@ -1,7 +1,10 @@
 import sys
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
-
+import shutil
+import subprocess
+import tempfile
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,7 +32,17 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QScrollArea,
 )
+try:
+    from PySide6.QtPdf import QPdfDocument
+    from PySide6.QtPdfWidgets import QPdfView
+
+    PDF_PREVIEW_AVAILABLE = True
+except ImportError:
+    QPdfDocument = None
+    QPdfView = None
+    PDF_PREVIEW_AVAILABLE = False
 
 from vault import (
     create_vault,
@@ -579,6 +592,261 @@ class DeleteWorker(QThread):
 
         self.completed.emit(results)
 
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp",
+    ".webp", ".tif", ".tiff", ".svg",
+}
+
+OFFICE_EXTENSIONS = {
+    ".odt", ".ods", ".odp", ".odg",
+    ".doc", ".docx", ".xls", ".xlsx",
+    ".ppt", ".pptx", ".rtf", ".csv",
+    ".fodt", ".fods", ".fodp",
+}
+
+
+def find_libreoffice():
+    """Recherche LibreOffice sur le PC."""
+    executable = shutil.which("soffice") or shutil.which("soffice.exe")
+
+    if executable:
+        return Path(executable)
+
+    candidates = [
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
+class PreviewWorker(QThread):
+    """Récupère temporairement un fichier et prépare son aperçu."""
+
+    progress = Signal(int, str)
+    succeeded = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, item, profile, parent=None):
+        super().__init__(parent)
+        self.item = item
+        self.profile = profile
+
+    def run(self):
+        temp_root = Path(__file__).resolve().parent.parent / "temp"
+
+        try:
+            temp_root.mkdir(parents=True, exist_ok=True)
+            temp_dir = Path(
+                tempfile.mkdtemp(
+                    prefix="nuage-preview-",
+                    dir=temp_root,
+                )
+            )
+        except OSError as exc:
+            self.failed.emit(
+                "Impossible de créer le dossier temporaire :\n"
+                f"{temp_root}\n\n{exc}"
+            )
+            return
+
+        try:
+            suffix = Path(self.item["name"]).suffix.lower()
+            source_path = temp_dir / f"source{suffix}"
+
+            self.progress.emit(0, "Récupération temporaire du fichier…")
+
+            download_file(
+                self.item["url"],
+                self.profile["username"],
+                self.profile["password"],
+                source_path,
+                lambda percent: self.progress.emit(
+                    percent, "Récupération temporaire du fichier…"
+                ),
+            )
+
+            if suffix in IMAGE_EXTENSIONS or suffix == ".pdf":
+                preview_path = source_path
+
+            elif suffix in OFFICE_EXTENSIONS:
+                soffice = find_libreoffice()
+
+                if soffice is None:
+                    raise RuntimeError(
+                        "LibreOffice n'a pas été trouvé sur ce PC. "
+                        "Il est nécessaire pour prévisualiser les documents "
+                        "bureautiques."
+                    )
+
+                self.progress.emit(100, "Conversion temporaire en PDF…")
+
+                profile_dir = temp_dir / "lo-profile"
+                profile_dir.mkdir()
+
+                command = [
+                    str(soffice),
+                    "--headless",
+                    f"-env:UserInstallation={profile_dir.as_uri()}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(temp_dir),
+                    str(source_path),
+                ]
+
+                try:
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        "La conversion en PDF a dépassé 120 secondes."
+                    ) from exc
+
+                preview_path = temp_dir / "source.pdf"
+
+                if result.returncode != 0 or not preview_path.is_file():
+                    details = (result.stderr or result.stdout or "").strip()
+                    if details:
+                        details = "\n\n" + details[-1200:]
+
+                    raise RuntimeError(
+                        "LibreOffice n'a pas réussi à convertir ce document."
+                        + details
+                    )
+
+            else:
+                raise RuntimeError(
+                    f"Le format {suffix or 'inconnu'} "
+                    "ne peut pas être prévisualisé."
+                )
+
+            self.progress.emit(100, "Aperçu prêt.")
+            self.succeeded.emit(str(preview_path), str(temp_dir))
+
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self.failed.emit(str(exc))
+
+
+class PreviewDialog(QDialog):
+    """Affiche une image ou un document PDF dans une fenêtre intégrée."""
+
+    def __init__(self, original_name, preview_path, temp_dir, parent=None):
+        super().__init__(parent)
+
+        self.original_name = original_name
+        self.preview_path = Path(preview_path)
+        self.temp_dir = Path(temp_dir)
+        self.original_pixmap = None
+        self.pdf_document = None
+
+        self.setWindowTitle(f"Aperçu — {original_name}")
+        self.resize(1000, 750)
+        self.setMinimumSize(500, 350)
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel(original_name)
+        title.setObjectName("sectionTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        suffix = self.preview_path.suffix.lower()
+
+        if suffix in IMAGE_EXTENSIONS:
+            self.image_scroll = QScrollArea()
+            self.image_scroll.setWidgetResizable(False)
+
+            self.image_label = QLabel()
+            self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.image_scroll.setWidget(self.image_label)
+            layout.addWidget(self.image_scroll, 1)
+
+            self.original_pixmap = QPixmap(str(self.preview_path))
+
+            if self.original_pixmap.isNull():
+                raise RuntimeError(
+                    "Qt ne peut pas afficher cette image."
+                )
+
+            self.update_image_preview()
+
+        elif suffix == ".pdf":
+            if not PDF_PREVIEW_AVAILABLE:
+                raise RuntimeError(
+                    "Le lecteur PDF de Qt n'est pas disponible. "
+                    "Vérifie l'installation de PySide6."
+                )
+
+            self.pdf_document = QPdfDocument(self)
+            status = self.pdf_document.load(str(self.preview_path))
+
+            if status == QPdfDocument.Status.Error:
+                raise RuntimeError(
+                    "Le PDF n'a pas pu être ouvert. "
+                    "Le fichier est peut-être endommagé ou protégé."
+                )
+
+            self.pdf_view = QPdfView()
+            self.pdf_view.setDocument(self.pdf_document)
+            self.pdf_view.setPageMode(
+                QPdfView.PageMode.MultiPage
+            )
+            self.pdf_view.setZoomMode(
+                QPdfView.ZoomMode.FitToWidth
+            )
+
+            layout.addWidget(self.pdf_view, 1)
+
+        else:
+            raise RuntimeError(
+                f"Aucun aperçu disponible pour {suffix}."
+            )
+
+        close_button = QPushButton("Fermer")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+    def update_image_preview(self):
+        if self.original_pixmap is None:
+            return
+
+        viewport_size = self.image_scroll.viewport().size()
+
+        if viewport_size.width() <= 0 or viewport_size.height() <= 0:
+            return
+
+        scaled = self.original_pixmap.scaled(
+            viewport_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_image_preview()
+
+    def done(self, result):
+        # Les fichiers temporaires ne sont conservés que pendant l'aperçu.
+        if self.pdf_document is not None:
+            self.pdf_document.close()
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        super().done(result)
 
 class RemoteFolderDialog(QDialog):
     """Permet de choisir un dossier de destination sur NUAGE."""
@@ -786,6 +1054,9 @@ class MainWindow(QMainWindow):
         self.delete_dialog = None
         self.transfer_worker = None
         self.transfer_dialog = None
+        self.preview_worker = None
+        self.preview_progress_dialog = None
+        self.preview_item_name = ""
         self.transfer_action_label = "Opération WebDAV"
 
         # Presse-papiers interne à Nuage Explorer.
@@ -1172,8 +1443,11 @@ class MainWindow(QMainWindow):
         )
 
     def open_item(self, item):
-        data = self.table.item(item.row(), 0).data(Qt.ItemDataRole.UserRole)
+        name_item = self.table.item(item.row(), 0)
+        if name_item is None:
+            return
 
+        data = name_item.data(Qt.ItemDataRole.UserRole)
         if not data:
             return
 
@@ -1182,56 +1456,133 @@ class MainWindow(QMainWindow):
             self.refresh()
             return
 
-        # Éviter deux téléchargements simultanés.
-        if (self.download_worker is not None and self.download_worker.isRunning()) or (
-            self.multi_download_worker is not None
-            and self.multi_download_worker.isRunning()
+        self.preview_file(data)
+
+    def preview_file(self, data):
+        if not self.profile:
+            return
+
+        suffix = Path(data["name"]).suffix.lower()
+
+        if (
+            suffix not in IMAGE_EXTENSIONS
+            and suffix != ".pdf"
+            and suffix not in OFFICE_EXTENSIONS
         ):
             QMessageBox.information(
                 self,
-                "Téléchargement en cours",
-                "Attends la fin du téléchargement actuel.",
+                "Aperçu indisponible",
+                f"Le format de « {data['name']} » "
+                "n'est pas pris en charge.\n\n"
+                "Utilise le menu contextuel pour télécharger ce fichier.",
             )
             return
 
-        destination, _ = QFileDialog.getSaveFileName(
-            self,
-            "Télécharger le fichier",
-            data["name"],
-            "Tous les fichiers (*)",
-        )
-
-        if not destination:
+        if (
+            (suffix == ".pdf" or suffix in OFFICE_EXTENSIONS)
+            and not PDF_PREVIEW_AVAILABLE
+        ):
+            QMessageBox.warning(
+                self,
+                "Lecteur PDF indisponible",
+                "Le module PDF de PySide6 est nécessaire "
+                "pour afficher les PDF et les documents bureautiques.",
+            )
             return
 
-        self.download_dialog = QProgressDialog(
-            f"Téléchargement de {data['name']}…",
+        if (
+            self.preview_worker is not None
+            and self.preview_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Aperçu en cours",
+                "Attends la fin de la préparation de l'aperçu actuel.",
+            )
+            return
+
+        self.preview_item_name = data["name"]
+
+        self.preview_progress_dialog = QProgressDialog(
+            "Récupération temporaire du fichier…",
             None,
             0,
             100,
             self,
         )
-        self.download_dialog.setWindowTitle("Téléchargement")
-        self.download_dialog.setCancelButton(None)
-        self.download_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.download_dialog.setMinimumDuration(300)
-        self.download_dialog.setValue(0)
-        self.download_dialog.show()
+        self.preview_progress_dialog.setWindowTitle("Préparation de l'aperçu")
+        self.preview_progress_dialog.setCancelButton(None)
+        self.preview_progress_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.preview_progress_dialog.setMinimumDuration(300)
+        self.preview_progress_dialog.setValue(0)
+        self.preview_progress_dialog.show()
 
-        self.download_worker = DownloadWorker(
-            data["url"],
-            self.profile["username"],
-            self.profile["password"],
-            destination,
+        self.preview_worker = PreviewWorker(
+            data,
+            self.profile,
             self,
         )
 
-        self.download_worker.progress.connect(self.download_progress)
-        self.download_worker.succeeded.connect(self.download_succeeded)
-        self.download_worker.failed.connect(self.download_failed)
-        self.download_worker.finished.connect(self.download_thread_finished)
-        self.download_worker.start()
+        self.preview_worker.progress.connect(
+            self.preview_progress
+        )
+        self.preview_worker.succeeded.connect(
+            self.preview_ready
+        )
+        self.preview_worker.failed.connect(
+            self.preview_failed
+        )
+        self.preview_worker.finished.connect(
+            self.preview_thread_finished
+        )
 
+        self.preview_worker.start()
+
+    def preview_progress(self, percent, message):
+        if self.preview_progress_dialog is not None:
+            self.preview_progress_dialog.setLabelText(message)
+            self.preview_progress_dialog.setValue(percent)
+
+    def preview_ready(self, preview_path, temp_dir):
+        if self.preview_progress_dialog is not None:
+            self.preview_progress_dialog.close()
+            self.preview_progress_dialog = None
+
+        try:
+            dialog = PreviewDialog(
+                self.preview_item_name,
+                preview_path,
+                temp_dir,
+                self,
+            )
+            dialog.exec()
+
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Aperçu impossible",
+                str(exc),
+            )
+
+        finally:
+            # Nettoyage supplémentaire si la fenêtre n'a pas pu s'ouvrir.
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def preview_failed(self, message):
+        if self.preview_progress_dialog is not None:
+            self.preview_progress_dialog.close()
+            self.preview_progress_dialog = None
+
+        QMessageBox.warning(
+            self,
+            "Aperçu impossible",
+            message,
+        )
+
+    def preview_thread_finished(self):
+        self.preview_worker = None
 
     def show_context_menu(self, position):
         clicked_item = self.table.itemAt(position)
@@ -2312,11 +2663,42 @@ class MainWindow(QMainWindow):
     def upload_thread_finished(self):
         self.upload_worker = None
 
+def clear_preview_temp():
+    """Vide le dossier temporaire de Nuage Explorer au démarrage."""
+    temp_root = Path(__file__).resolve().parent.parent / "temp"
+
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return [f"Impossible d'accéder à {temp_root} : {exc}"]
+
+    errors = []
+
+    for item in temp_root.iterdir():
+        try:
+            if item.is_symlink() or not item.is_dir():
+                item.unlink()
+            else:
+                shutil.rmtree(item)
+        except OSError as exc:
+            errors.append(f"{item.name} : {exc}")
+
+    return errors
 
 def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     app.setApplicationName("Nuage Explorer")
+
+    cleanup_errors = clear_preview_temp()
+
+    if cleanup_errors:
+        QMessageBox.warning(
+            None,
+            "Nettoyage temporaire incomplet",
+            "Certains fichiers temporaires n'ont pas pu être supprimés :\n\n"
+            + "\n".join(cleanup_errors[:10]),
+        )
 
     result = obtain_vault()
     if result is None:
