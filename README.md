@@ -122,6 +122,70 @@ Nuage_Explorer/
 - Ne pas utiliser `temp` pour stocker des fichiers personnels : son contenu est supprimé au lancement.
 - Si le nettoyage échoue, certains fichiers peuvent rester temporairement dans ce dossier ; fermer l'application et vérifier les fichiers avant de les supprimer manuellement.
 
+## Compiler la version portable pour Windows
+
+La version portable est construite avec **PyInstaller**. Il faut effectuer cette compilation sur Windows : PyInstaller produit une application pour le système sur lequel il tourne. Le mode `--onedir` est volontairement utilisé ; il crée un dossier autonome contenant l'exécutable et ses bibliothèques Qt.
+
+### Prérequis
+
+- Python installé sur le PC de compilation ;
+- le code source du projet, notamment `src/main.py`, `src/webdav.py` et `src/vault.py` ;
+- `requirements.txt` à jour ;
+- une clé USB disposant d'assez d'espace libre.
+
+### Compiler depuis la clé USB
+
+Dans l'exemple ci-dessous, le projet source se trouve dans `F:\Nuage_Explorer`. Adapter la lettre du lecteur et le chemin si nécessaire. Ouvrir PowerShell et exécuter les commandes depuis la racine du projet :
+
+```powershell
+cd F:\Nuage_Explorer
+
+# Recréer l'environnement si nécessaire (voir la section précédente).
+# Installer les dépendances de l'application.
+.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+
+# Installer l'outil de compilation.
+.\.venv\Scripts\python.exe -m pip install --upgrade pyinstaller
+
+# Vérifier la syntaxe avant la compilation.
+.\.venv\Scripts\python.exe -m py_compile .\src\main.py .\src\webdav.py .\src\vault.py
+
+# Construire l'application portable.
+.\.venv\Scripts\python.exe -m PyInstaller `
+    --noconfirm `
+    --clean `
+    --windowed `
+    --onedir `
+    --name NuageExplorer `
+    --hidden-import PySide6.QtPdf `
+    --hidden-import PySide6.QtPdfWidgets `
+    .\src\main.py
+```
+
+À la fin, l'application compilée se trouve dans :
+
+```text
+F:\Nuage_Explorer\dist\NuageExplorer\
+├── NuageExplorer.exe
+└── _internal\
+    └── bibliothèques Python, composants Qt et dépendances
+```
+
+**Ne copiez pas uniquement `NuageExplorer.exe`** : l'exécutable a besoin des fichiers du dossier `_internal`. Pour distribuer l'application, copier le dossier `dist\NuageExplorer` en entier sur la clé USB ou à l'emplacement souhaité. On peut lancer `NuageExplorer.exe` directement depuis ce dossier.
+
+Le dossier `build` et le fichier `NuageExplorer.spec` sont des produits de compilation ; ils ne sont pas nécessaires pour lancer l'application. Ils peuvent être recréés lors d'une prochaine compilation.
+
+### Fichiers temporaires et aperçus
+
+En mode compilé, Nuage Explorer utilise le dossier `temp` situé à côté de `NuageExplorer.exe`. Il est créé automatiquement s'il n'existe pas, vidé au démarrage, et les aperçus sont normalement supprimés quand leur fenêtre se ferme. Ne pas y conserver de fichiers personnels.
+
+### Limites à connaître
+
+- PyInstaller embarque Python et les dépendances détectées, mais **n'embarque pas LibreOffice**. Pour prévisualiser les documents bureautiques via conversion en PDF, LibreOffice doit être installé et autorisé sur le PC utilisé.
+- Il est conseillé de tester la version compilée après chaque modification du code, notamment l'ouverture d'images, de PDF et de documents LibreOffice, ainsi que les opérations WebDAV.
+- La compilation portable ne contourne pas les règles informatiques du lycée : Windows Defender, les stratégies de sécurité ou le filtrage réseau peuvent bloquer l'exécutable ou la connexion WebDAV.
+- **Vérifier l'emplacement du coffre chiffré avant de déplacer l'application vers une autre clé ou un autre PC.** Il est déterminé par `get_vault_path()` dans `src/vault.py` ; ne pas supposer que le coffre se trouve automatiquement à côté de l'exécutable.
+
 ## À savoir
 
 - Une connexion HTTPS valide et des identifiants WebDAV sont nécessaires.
