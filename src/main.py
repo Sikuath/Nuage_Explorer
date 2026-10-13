@@ -291,7 +291,7 @@ def obtain_vault():
         while True:
             password, ok = QInputDialog.getText(
                 None,
-                "Nuage Explorer",
+                "Nextcloud Explorer",
                 "Mot de passe maître :",
                 QLineEdit.EchoMode.Password,
             )
@@ -305,7 +305,7 @@ def obtain_vault():
                 QMessageBox.warning(
                     None,
                     "Coffre verrouillé",
-                    "Mot de passe incorrect ou coffre endommagé.",
+                    "Mot de passe incorrect.",
                 )
             except VaultError as exc:
                 QMessageBox.critical(None, "Erreur", str(exc))
@@ -1052,7 +1052,7 @@ class OfficeEditWorker(QThread):
             self.editor_started.emit(name)
 
             # Le thread attend pendant que l'utilisateur travaille.
-            # L'interface Nuage Explorer reste réactive.
+            # L'interface Nextcloud Explorer reste réactive.
             process.wait()
 
             if not local_path.is_file():
@@ -1258,7 +1258,7 @@ class RemoteFolderDialog(QDialog):
         self.tree.itemExpanded.connect(self.load_children)
         layout.addWidget(self.tree)
 
-        root = QTreeWidgetItem(["☁  Mon NUAGE"])
+        root = QTreeWidgetItem(["☁  Mon Nextcloud"])
         root.setData(0, Qt.ItemDataRole.UserRole, profile["url"])
         root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
         root.addChild(QTreeWidgetItem(["Chargement…"]))
@@ -1625,13 +1625,13 @@ class MainWindow(QMainWindow):
         self.new_office_worker = None
         self.office_edit_progress_dialog = None
 
-        # Presse-papiers interne à Nuage Explorer.
+        # Presse-papiers interne à Nextcloud Explorer.
         self.clipboard_items = []
         self.clipboard_mode = None
         self.clear_clipboard_after_transfer = False
         self.multi_download_skipped = 0
         
-        self.setWindowTitle("Nuage Explorer")
+        self.setWindowTitle("Nextcloud Explorer")
         self.resize(1100, 700)
         self.setMinimumSize(800, 500)
 
@@ -1654,7 +1654,7 @@ class MainWindow(QMainWindow):
         side.setSpacing(7)
 
         # Identité de l'application
-        brand = QLabel("☁  Nuage Explorer")
+        brand = QLabel("☁  Nextcloud Explorer")
         brand.setObjectName("sectionTitle")
         side.addWidget(brand)
         side.addSpacing(8)
@@ -1702,11 +1702,11 @@ class MainWindow(QMainWindow):
         # --------------------------------------------------
         # NEXTCLOUD : conserver l'arborescence existante
         # --------------------------------------------------
-        nav_label = QLabel("MON NUAGE")
+        nav_label = QLabel("MON NEXTCLOUD")
         nav_label.setObjectName("muted")
         side.addWidget(nav_label)
 
-        self.home_button = QPushButton("☁   Mon NUAGE")
+        self.home_button = QPushButton("☁   Mon NEXTCLOUD")
         self.home_button.setObjectName("navButton")
         self.home_button.setCheckable(True)
         self.home_button.setChecked(True)
@@ -2054,7 +2054,7 @@ class MainWindow(QMainWindow):
 
         self.back_button.setEnabled(len(self.url_stack) > 1)
         self.status_label.setText(
-            f"✓  {shown} élément(s)   •   Connexion WebDAV réussie"
+            f"✓  {shown} élément(s)   •   Connexion WebDAV réussie • © 2026 Sikuath — Code sous licence MIT"
         )
 
     def open_item(self, item):
@@ -2309,7 +2309,7 @@ class MainWindow(QMainWindow):
                 "Un document est encore ouvert dans LibreOffice "
                 "ou sa synchronisation est en cours.\n\n"
                 "Ferme LibreOffice et attends la fin de la "
-                "synchronisation avant de quitter Nuage Explorer.",
+                "synchronisation avant de quitter Nextcloud Explorer.",
             )
             event.ignore()
             return
@@ -2759,7 +2759,7 @@ class MainWindow(QMainWindow):
             100,
             self,
         )
-        self.transfer_dialog.setWindowTitle("Nuage Explorer")
+        self.transfer_dialog.setWindowTitle("Nextcloud Explorer")
         self.transfer_dialog.setCancelButton(None)
         self.transfer_dialog.setWindowModality(
             Qt.WindowModality.WindowModal
@@ -3856,7 +3856,7 @@ class MainWindow(QMainWindow):
         self.upload_worker = None
 
 def clear_preview_temp():
-    """Vide le dossier temporaire de Nuage Explorer au démarrage."""
+    """Vide le dossier temporaire de Nextcloud Explorer au démarrage."""
     temp_root = application_root() / "temp"
 
     try:
@@ -3880,7 +3880,7 @@ def clear_preview_temp():
 def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
-    app.setApplicationName("Nuage Explorer")
+    app.setApplicationName("Nextcloud Explorer")
 
     cleanup_errors = clear_preview_temp()
 
