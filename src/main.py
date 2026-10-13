@@ -6,8 +6,9 @@ from urllib.parse import quote, urljoin, urlsplit
 import shutil
 import subprocess
 import tempfile
-from PySide6.QtCore import QDir
-from PySide6.QtGui import QPixmap
+import json
+from PySide6.QtCore import QDir, QMimeData, QUrl
+from PySide6.QtGui import QPixmap ,QDrag
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
@@ -1284,6 +1285,178 @@ class ResourceOperationWorker(QThread):
 
         self.completed.emit(results)
 
+
+class DragDropTableWidget(QTableWidget):
+    """Tableau Nextcloud : accepte les fichiers Windows et permet de les glisser."""
+
+    local_files_dropped = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(0, 4, parent)
+
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(
+            QAbstractItemView.DragDropMode.DragDrop
+        )
+        self.setDropIndicatorShown(True)
+
+    def dragEnterEvent(self, event):
+        mime = event.mimeData()
+
+        if (
+            mime.hasUrls()
+            and any(url.isLocalFile() for url in mime.urls())
+        ):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        mime = event.mimeData()
+
+        if (
+            mime.hasUrls()
+            and any(url.isLocalFile() for url in mime.urls())
+        ):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            return
+
+        event.ignore()
+
+    def dropEvent(self, event):
+        paths = []
+
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+
+            path = Path(url.toLocalFile())
+
+            # L'envoi direct ne concerne pour l'instant que les fichiers.
+            if path.is_file():
+                paths.append(str(path))
+
+        if paths:
+            self.local_files_dropped.emit(paths)
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def startDrag(self, supported_actions):
+        """Expose les fichiers Nextcloud sélectionnés au glisser-déposer."""
+        items = []
+        rows = sorted({
+            index.row()
+            for index in self.selectionModel().selectedRows()
+        })
+
+        for row in rows:
+            cell = self.item(row, 0)
+            if cell is None:
+                continue
+
+            data = cell.data(Qt.ItemDataRole.UserRole)
+
+            if data and not data.get("is_directory", False):
+                items.append({
+                    "url": data["url"],
+                    "name": data["name"],
+                    "is_directory": False,
+                })
+
+        if not items:
+            return
+
+        mime = QMimeData()
+        mime.setData(
+            "application/x-nuage-remote-items",
+            json.dumps(items).encode("utf-8"),
+        )
+
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+
+class LocalDropTreeView(QTreeView):
+    """Arborescence Windows : reçoit les fichiers glissés depuis Nextcloud."""
+
+    remote_items_dropped = Signal(list, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setAcceptDrops(True)
+        self.setDragEnabled(False)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(
+            QAbstractItemView.DragDropMode.DropOnly
+        )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(
+            "application/x-nuage-remote-items"
+        ):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(
+            "application/x-nuage-remote-items"
+        ):
+            index = self.indexAt(event.position().toPoint())
+
+            if index.isValid():
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat(
+            "application/x-nuage-remote-items"
+        ):
+            event.ignore()
+            return
+
+        index = self.indexAt(event.position().toPoint())
+
+        if not index.isValid():
+            event.ignore()
+            return
+
+        destination = self.model().filePath(index)
+
+        if not Path(destination).is_dir():
+            event.ignore()
+            return
+
+        try:
+            items = json.loads(bytes(
+                event.mimeData().data(
+                    "application/x-nuage-remote-items"
+                )
+            ).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            event.ignore()
+            return
+
+        if not items:
+            event.ignore()
+            return
+
+        self.remote_items_dropped.emit(items, destination)
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+
 class MainWindow(QMainWindow):
     def __init__(self, vault_path, master_password, vault_data):
         super().__init__()
@@ -1363,7 +1536,7 @@ class MainWindow(QMainWindow):
         )
         self.local_model.setRootPath("")
 
-        self.local_tree = QTreeView()
+        self.local_tree = LocalDropTreeView()
         self.local_tree.setObjectName("localTree")
         self.local_tree.setModel(self.local_model)
         self.local_tree.setRootIndex(self.local_model.index(""))
@@ -1376,7 +1549,9 @@ class MainWindow(QMainWindow):
         # Afficher uniquement les noms des dossiers et des lecteurs
         for column in range(1, self.local_model.columnCount()):
             self.local_tree.hideColumn(column)
-
+        self.local_tree.remote_items_dropped.connect(
+            self.download_dropped_to_local
+        )
         side.addWidget(self.local_tree, 1)
 
         # Séparateur visuel
@@ -1481,7 +1656,10 @@ class MainWindow(QMainWindow):
         main.addLayout(path_bar)
 
         # Tableau de fichiers
-        self.table = QTableWidget(0, 4)
+        self.table = DragDropTableWidget()
+        self.table.local_files_dropped.connect(
+            self.upload_dropped_to_remote
+        )
         self.table.setHorizontalHeaderLabels(["Nom", "Taille", "Modifié le", "Type"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2927,6 +3105,298 @@ class MainWindow(QMainWindow):
             self,
             "Dossier créé",
             f"Le dossier « {name} » a bien été créé.",
+        )
+
+
+    def upload_dropped_to_remote(self, paths):
+        """Envoie les fichiers Windows déposés sur le tableau Nextcloud."""
+        if not self.profile or not self.url_stack:
+            QMessageBox.warning(
+                self,
+                "Compte non configuré",
+                "Configure d'abord ton compte Nextcloud.",
+            )
+            return
+
+        if (
+            self.multi_upload_worker is not None
+            and self.multi_upload_worker.isRunning()
+        ) or (
+            self.upload_worker is not None
+            and self.upload_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Import en cours",
+                "Attends la fin de l'import actuel.",
+            )
+            return
+
+        if (
+            self.multi_download_worker is not None
+            and self.multi_download_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Transfert en cours",
+                "Attends la fin du transfert actuel.",
+            )
+            return
+
+        existing_names = {
+            self.table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )["name"].casefold()
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0) is not None
+            and self.table.item(row, 0).data(
+                Qt.ItemDataRole.UserRole
+            )
+        }
+
+        conflicts = [
+            Path(path).name
+            for path in paths
+            if Path(path).name.casefold() in existing_names
+        ]
+
+        overwrite_all = False
+        skip_names = set()
+
+        if conflicts:
+            answer = QMessageBox.question(
+                self,
+                "Fichiers déjà présents",
+                f"{len(conflicts)} fichier(s) existent déjà dans "
+                "le dossier Nextcloud courant.\n\n"
+                "Oui : remplacer les fichiers existants.\n"
+                "Non : ignorer les fichiers déjà présents.\n"
+                "Annuler : abandonner le transfert.",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+
+            if answer == QMessageBox.StandardButton.Yes:
+                overwrite_all = True
+            else:
+                skip_names = {name.casefold() for name in conflicts}
+
+        files = []
+
+        for path in paths:
+            source = Path(path)
+
+            if not source.is_file():
+                continue
+
+            exists = source.name.casefold() in existing_names
+
+            if exists and source.name.casefold() in skip_names:
+                continue
+
+            files.append({
+                "source": str(source),
+                "name": source.name,
+                "overwrite": overwrite_all and exists,
+            })
+
+        if not files:
+            self.status_label.setText(
+                "Aucun fichier à envoyer."
+            )
+            return
+
+        self.multi_upload_dialog = QProgressDialog(
+            "Préparation de l'envoi…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.multi_upload_dialog.setWindowTitle(
+            "Envoi vers Nextcloud"
+        )
+        self.multi_upload_dialog.setCancelButton(None)
+        self.multi_upload_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.multi_upload_dialog.setMinimumDuration(300)
+        self.multi_upload_dialog.setValue(0)
+        self.multi_upload_dialog.show()
+
+        self.multi_upload_worker = MultiUploadWorker(
+            files,
+            self.url_stack[-1],
+            self.profile["username"],
+            self.profile["password"],
+            self,
+        )
+
+        self.multi_upload_worker.progress.connect(
+            self.multi_upload_progress
+        )
+        self.multi_upload_worker.current_file.connect(
+            self.multi_upload_current_file
+        )
+        self.multi_upload_worker.completed.connect(
+            self.multi_upload_completed
+        )
+        self.multi_upload_worker.finished.connect(
+            self.multi_upload_thread_finished
+        )
+        self.multi_upload_worker.start()
+
+        self.status_label.setText(
+            f"Envoi de {len(files)} fichier(s) vers Nextcloud…"
+        )
+
+
+    def download_dropped_to_local(self, items, destination):
+        """Télécharge les fichiers Nextcloud vers le dossier Windows visé."""
+        if not self.profile:
+            return
+
+        if (
+            self.multi_download_worker is not None
+            and self.multi_download_worker.isRunning()
+        ) or (
+            self.download_worker is not None
+            and self.download_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Téléchargement en cours",
+                "Attends la fin du téléchargement actuel.",
+            )
+            return
+
+        if (
+            self.multi_upload_worker is not None
+            and self.multi_upload_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Transfert en cours",
+                "Attends la fin du transfert actuel.",
+            )
+            return
+
+        # Seuls les fichiers sont téléchargés par ce glisser-déposer.
+        files = [
+            {
+                "url": item["url"],
+                "name": Path(item["name"]).name,
+            }
+            for item in items
+            if not item.get("is_directory", False)
+        ]
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun fichier",
+                "Glisse des fichiers Nextcloud vers un dossier Windows. "
+                "Le téléchargement de dossiers entiers n'est pas encore "
+                "pris en charge par ce glisser-déposer.",
+            )
+            return
+
+        destination_path = Path(destination)
+
+        conflicts = [
+            item for item in files
+            if (destination_path / item["name"]).exists()
+        ]
+
+        skipped = 0
+
+        if conflicts:
+            answer = QMessageBox.question(
+                self,
+                "Fichiers déjà présents",
+                f"{len(conflicts)} fichier(s) existent déjà dans "
+                "le dossier Windows choisi.\n\n"
+                "Oui : remplacer les fichiers existants.\n"
+                "Non : conserver les fichiers existants et les ignorer.\n"
+                "Annuler : abandonner le transfert.",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+
+            if answer == QMessageBox.StandardButton.No:
+                existing_names = {
+                    item["name"].casefold()
+                    for item in conflicts
+                }
+                files = [
+                    item for item in files
+                    if item["name"].casefold() not in existing_names
+                ]
+                skipped = len(conflicts)
+
+        if not files:
+            QMessageBox.information(
+                self,
+                "Aucun téléchargement",
+                "Tous les fichiers existaient déjà dans le dossier.",
+            )
+            return
+
+        self.multi_download_skipped = skipped
+
+        self.multi_download_dialog = QProgressDialog(
+            "Préparation du téléchargement…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.multi_download_dialog.setWindowTitle(
+            "Téléchargement vers Windows"
+        )
+        self.multi_download_dialog.setCancelButton(None)
+        self.multi_download_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.multi_download_dialog.setMinimumDuration(300)
+        self.multi_download_dialog.setValue(0)
+        self.multi_download_dialog.show()
+
+        self.multi_download_worker = MultiDownloadWorker(
+            files,
+            str(destination_path),
+            self.profile["username"],
+            self.profile["password"],
+            self,
+        )
+
+        self.multi_download_worker.progress.connect(
+            self.multi_download_progress
+        )
+        self.multi_download_worker.current_file.connect(
+            self.multi_download_current_file
+        )
+        self.multi_download_worker.completed.connect(
+            self.multi_download_completed
+        )
+        self.multi_download_worker.finished.connect(
+            self.multi_download_thread_finished
+        )
+        self.multi_download_worker.start()
+
+        self.status_label.setText(
+            f"Téléchargement de {len(files)} fichier(s) vers "
+            f"{destination_path}…"
         )
 
     def import_file(self):
