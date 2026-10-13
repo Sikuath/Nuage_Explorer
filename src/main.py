@@ -6,6 +6,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import shutil
 import subprocess
 import tempfile
+from PySide6.QtCore import QDir
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -35,6 +36,8 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QScrollArea,
+    QFileSystemModel,
+    QTreeView,
 )
 try:
     from PySide6.QtPdf import QPdfDocument
@@ -231,6 +234,38 @@ QTreeWidget::item:selected {
     background: #d2e5ff;
     color: #164e88;
 }
+
+QFrame#sidebarSeparator {
+    background-color: #d8e2ed;
+    border: none;
+    max-height: 1px;
+    margin-top: 5px;
+    margin-bottom: 5px;
+}
+
+QTreeView#localTree {
+    background-color: transparent;
+    border: none;
+    outline: none;
+    color: #334155;
+    font-size: 12px;
+    padding: 2px;
+}
+
+QTreeView#localTree::item {
+    padding: 4px 2px;
+    border-radius: 4px;
+}
+
+QTreeView#localTree::item:hover {
+    background-color: #e5eef8;
+}
+
+QTreeView#localTree::item:selected {
+    background-color: #d5e6fa;
+    color: #1e40af;
+}
+
 """
 def application_root() -> Path:
     """Retourne le dossier du projet ou celui de l'exécutable portable."""
@@ -1297,21 +1332,64 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        
         # Barre latérale
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(270)
 
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(14, 22, 14, 16)
-        side.setSpacing(9)
+        side.setContentsMargins(14, 18, 14, 16)
+        side.setSpacing(7)
 
+        # Identité de l'application
         brand = QLabel("☁  Nuage Explorer")
         brand.setObjectName("sectionTitle")
         side.addWidget(brand)
-        side.addSpacing(20)
+        side.addSpacing(8)
 
-        nav_label = QLabel("ESPACE PERSONNEL")
+        # --------------------------------------------------
+        # ORDINATEUR : arborescence réelle de Windows
+        # --------------------------------------------------
+        local_label = QLabel("ORDINATEUR")
+        local_label.setObjectName("muted")
+        side.addWidget(local_label)
+
+        self.local_model = QFileSystemModel(self)
+        self.local_model.setFilter(
+            QDir.Filter.AllDirs
+            | QDir.Filter.NoDotAndDotDot
+            | QDir.Filter.Drives
+        )
+        self.local_model.setRootPath("")
+
+        self.local_tree = QTreeView()
+        self.local_tree.setObjectName("localTree")
+        self.local_tree.setModel(self.local_model)
+        self.local_tree.setRootIndex(self.local_model.index(""))
+        self.local_tree.setHeaderHidden(True)
+        self.local_tree.setIndentation(15)
+        self.local_tree.setAnimated(True)
+        self.local_tree.setUniformRowHeights(True)
+        self.local_tree.setMinimumHeight(150)
+
+        # Afficher uniquement les noms des dossiers et des lecteurs
+        for column in range(1, self.local_model.columnCount()):
+            self.local_tree.hideColumn(column)
+
+        side.addWidget(self.local_tree, 1)
+
+        # Séparateur visuel
+        separator = QFrame()
+        separator.setObjectName("sidebarSeparator")
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFixedHeight(1)
+        side.addWidget(separator)
+
+        # --------------------------------------------------
+        # NEXTCLOUD : conserver l'arborescence existante
+        # --------------------------------------------------
+        nav_label = QLabel("MON NUAGE")
         nav_label.setObjectName("muted")
         side.addWidget(nav_label)
 
@@ -1321,6 +1399,7 @@ class MainWindow(QMainWindow):
         self.home_button.setChecked(True)
         self.home_button.clicked.connect(self.go_home)
         side.addWidget(self.home_button)
+
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(18)
@@ -1328,16 +1407,15 @@ class MainWindow(QMainWindow):
         self.tree.setUniformRowHeights(True)
         self.tree.itemExpanded.connect(self.load_tree_children)
         self.tree.itemClicked.connect(self.tree_item_clicked)
-        side.addWidget(self.tree, 1)
+        side.addWidget(self.tree, 2)
 
         self.tree_root = None
 
+        # Compte et connexion
         self.settings_button = QPushButton("⚙   Compte et connexion")
         self.settings_button.setObjectName("navButton")
         self.settings_button.clicked.connect(self.configure_profile)
         side.addWidget(self.settings_button)
-
-        side.addStretch()
 
         self.account_label = QLabel("●  Non connecté")
         self.account_label.setObjectName("muted")
@@ -1345,6 +1423,7 @@ class MainWindow(QMainWindow):
         side.addWidget(self.account_label)
 
         root.addWidget(sidebar)
+
 
         # Zone principale
         content = QWidget()
@@ -1360,7 +1439,7 @@ class MainWindow(QMainWindow):
         heading.setObjectName("appTitle")
         heading_box.addWidget(heading)
 
-        self.subtitle = QLabel("Tes documents, accessibles depuis NUAGE")
+        self.subtitle = QLabel("Tes documents, accessibles depuis Nextcloud")
         self.subtitle.setObjectName("muted")
         heading_box.addWidget(self.subtitle)
 
@@ -1434,7 +1513,7 @@ class MainWindow(QMainWindow):
             self.url_stack = [self.profile["url"]]
             self.rebuild_tree()
             self.account_label.setText(
-                f"●  Connecté à NUAGE\n{self.profile['username']}"
+                f"●  Connecté à Nextcloud\n{self.profile['username']}"
             )
             self.refresh()
         else:
@@ -1471,7 +1550,7 @@ class MainWindow(QMainWindow):
         self.profile = new_profile
         self.url_stack = [self.profile["url"]]
         self.rebuild_tree()
-        self.account_label.setText(f"●  Connecté à NUAGE\n{self.profile['username']}")
+        self.account_label.setText(f"●  Connecté à Nextcloud\n{self.profile['username']}")
         self.home_button.setChecked(True)
         self.refresh()
 
@@ -1487,14 +1566,14 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def rebuild_tree(self):
-        """Reconstruit la racine de l'arborescence NUAGE."""
+        """Reconstruit la racine de l'arborescence Nextcloud."""
         self.tree.clear()
         self.tree_root = None
 
         if not self.profile:
             return
 
-        root = QTreeWidgetItem(["☁  Mon NUAGE"])
+        root = QTreeWidgetItem(["☁  Mon Nextcloud"])
         root.setData(0, Qt.ItemDataRole.UserRole, self.profile["url"])
         root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
 
@@ -1846,7 +1925,7 @@ class MainWindow(QMainWindow):
 
     def office_sync_started(self, name):
         self.office_edit_progress_dialog = QProgressDialog(
-            f"Envoi des modifications de {name} vers NUAGE…",
+            f"Envoi des modifications de {name} vers Nextcloud…",
             None,
             0,
             100,
