@@ -7,6 +7,14 @@ import shutil
 import subprocess
 import tempfile
 import json
+from odf.opendocument import (
+    OpenDocumentText,
+    OpenDocumentSpreadsheet,
+    OpenDocumentPresentation,
+)
+from odf.text import P
+from odf.table import Table, TableRow, TableCell
+from odf.draw import Page
 from PySide6.QtCore import QDir, QMimeData, QUrl
 from PySide6.QtGui import QPixmap ,QDrag
 from PySide6.QtCore import Qt, QThread, Signal
@@ -817,6 +825,133 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+class NewOfficeDocumentWorker(QThread):
+    progress = Signal(str)
+    result_ready = Signal(bool, str)
+
+    def __init__(
+        self,
+        document_type,
+        filename,
+        folder_url,
+        username,
+        password,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.document_type = document_type
+        self.filename = filename
+        self.folder_url = folder_url
+        self.username = username
+        self.password = password
+
+    def run(self):
+        temp_dir = None
+
+        try:
+            office = find_libreoffice()
+            if not office:
+                raise RuntimeError(
+                    "LibreOffice est introuvable sur cet ordinateur."
+                )
+
+            editions_dir = Path(application_root()) / "editions"
+            editions_dir.mkdir(parents=True, exist_ok=True)
+
+            temp_dir = Path(
+                tempfile.mkdtemp(
+                    prefix="nuage-nouveau-",
+                    dir=str(editions_dir),
+                )
+            )
+
+            local_path = temp_dir / self.filename
+
+            self.progress.emit("Création du document…")
+
+            if self.document_type == "writer":
+                document = OpenDocumentText()
+                document.text.addElement(P(text=""))
+                document.save(str(local_path))
+
+            elif self.document_type == "calc":
+                document = OpenDocumentSpreadsheet()
+                table = Table(name="Feuille1")
+                document.spreadsheet.addElement(table)
+                row = TableRow()
+                table.addElement(row)
+                row.addElement(TableCell())
+                document.save(str(local_path))
+
+            elif self.document_type == "impress":
+                document = OpenDocumentPresentation()
+                page = Page(
+                    name="Diapo 1",
+                    masterpagename="Default",
+                )
+                document.presentation.addElement(page)
+                document.save(str(local_path))
+
+            else:
+                raise ValueError("Type de document inconnu.")
+
+            # Profil dédié : évite de réutiliser une instance
+            # LibreOffice déjà ouverte.
+            profile_dir = temp_dir / "profil-libreoffice"
+            profile_dir.mkdir()
+
+            profile_url = profile_dir.resolve().as_uri()
+
+            self.progress.emit(
+                "LibreOffice est ouvert. Enregistre puis ferme "
+                "le document pour l'envoyer sur Nextcloud."
+            )
+
+            process = subprocess.Popen(
+                [
+                    office,
+                    f"-env:UserInstallation={profile_url}",
+                    str(local_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            process.wait()
+
+            if not local_path.exists():
+                raise RuntimeError(
+                    "Le fichier local est introuvable après fermeture."
+                )
+
+            self.progress.emit("Envoi du document sur Nextcloud…")
+
+            # upload_file attend l'URL du DOSSIER de destination :
+            # il y ajoute lui-même le nom du fichier.
+            upload_file(
+                str(local_path),
+                self.folder_url,
+                self.username,
+                self.password,
+                lambda *args: None,
+                overwrite=False,
+            )
+
+            self.result_ready.emit(
+                True,
+                f"Document envoyé sur Nextcloud : {self.filename}",
+            )
+
+        except Exception as exc:
+            self.result_ready.emit(
+                False,
+                f"Échec de la création ou de l'envoi : {exc}"
+                + (
+                    f"\n\nLe fichier local est conservé dans :\n{temp_dir}"
+                    if temp_dir and temp_dir.exists()
+                    else ""
+                ),
+            )
+
 class OfficeEditWorker(QThread):
     """Ouvre un document dans LibreOffice puis synchronise les modifications."""
 
@@ -1390,12 +1525,14 @@ class LocalDropTreeView(QTreeView):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        
         self.setAcceptDrops(True)
-        self.setDragEnabled(False)
+        self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(
-            QAbstractItemView.DragDropMode.DropOnly
+            QAbstractItemView.DragDropMode.DragDrop
         )
+
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(
@@ -1485,6 +1622,7 @@ class MainWindow(QMainWindow):
         self.preview_item_name = ""
         self.transfer_action_label = "Opération WebDAV"
         self.office_edit_worker = None
+        self.new_office_worker = None
         self.office_edit_progress_dialog = None
 
         # Presse-papiers interne à Nuage Explorer.
@@ -1530,7 +1668,7 @@ class MainWindow(QMainWindow):
 
         self.local_model = QFileSystemModel(self)
         self.local_model.setFilter(
-            QDir.Filter.AllDirs
+            QDir.Filter.AllEntries
             | QDir.Filter.NoDotAndDotDot
             | QDir.Filter.Drives
         )
@@ -1673,7 +1811,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
-
+        
         for column in (1, 2, 3):
             self.table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
@@ -2180,7 +2318,7 @@ class MainWindow(QMainWindow):
 
     def office_edit_thread_finished(self):
         self.office_edit_worker = None
-
+       
     def preview_progress(self, percent, message):
         if self.preview_progress_dialog is not None:
             self.preview_progress_dialog.setLabelText(message)
@@ -2250,6 +2388,25 @@ class MainWindow(QMainWindow):
         single_item = len(items) == 1
 
         menu = QMenu(self)
+
+        # Création de documents LibreOffice
+        new_office_menu = menu.addMenu("＋  Nouveau document LibreOffice")
+
+        writer_action = new_office_menu.addAction("Document Writer (.odt)")
+        calc_action = new_office_menu.addAction("Classeur Calc (.ods)")
+        impress_action = new_office_menu.addAction("Présentation Impress (.odp)")
+
+        writer_action.triggered.connect(
+            lambda checked=False: self.create_office_document("writer")
+        )
+        calc_action.triggered.connect(
+            lambda checked=False: self.create_office_document("calc")
+        )
+        impress_action.triggered.connect(
+            lambda checked=False: self.create_office_document("impress")
+        )
+
+        menu.addSeparator()
 
         # Groupe 1 : ouvrir
         open_action = menu.addAction("📂  Ouvrir")
@@ -3025,6 +3182,108 @@ class MainWindow(QMainWindow):
         if len(self.url_stack) > 1:
             self.url_stack.pop()
             self.refresh()
+
+
+    def create_office_document(self, document_type):
+        document_types = {
+            "writer": ("Document Writer", ".odt"),
+            "calc": ("Classeur Calc", ".ods"),
+            "impress": ("Présentation Impress", ".odp"),
+        }
+
+        if document_type not in document_types:
+            return
+
+        label, extension = document_types[document_type]
+
+        filename, accepted = QInputDialog.getText(
+            self,
+            "Nouveau document LibreOffice",
+            "Nom du fichier :",
+            text=label + extension,
+        )
+
+        if not accepted:
+            return
+
+        filename = filename.strip()
+
+        if "/" in filename or "\\" in filename:
+            QMessageBox.warning(
+                self,
+                "Nom invalide",
+                "Le nom ne doit pas contenir de séparateur de chemin.",
+            )
+            return
+        
+        if not filename:
+            QMessageBox.warning(
+                self,
+                "Nom invalide",
+                "Le nom du fichier ne peut pas être vide.",
+            )
+            return
+
+        # Ajoute l'extension attendue si elle est absente.
+        if not filename.lower().endswith(extension):
+            filename += extension
+
+        # Évite d'écraser un fichier déjà présent dans le dossier affiché.
+        existing_names = {
+            self.table.item(row, 0).text().strip().casefold()
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 0) is not None
+        }
+
+        if filename.casefold() in existing_names:
+            QMessageBox.warning(
+                self,
+                "Fichier déjà présent",
+                f"Un élément nommé « {filename} » existe déjà dans ce dossier.",
+            )
+            return
+
+        # Un seul nouveau document à la fois.
+                # Un seul nouveau document à la fois.
+        if (
+            self.new_office_worker is not None
+            and self.new_office_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Création en cours",
+                "Un nouveau document est déjà en cours de création.",
+            )
+            return
+
+        self.new_office_worker = NewOfficeDocumentWorker(
+            document_type=document_type,
+            filename=filename,
+            folder_url=self.url_stack[-1],
+            username=self.profile["username"],
+            password=self.profile["password"],
+            parent=self,
+        )
+
+        self.new_office_worker.result_ready.connect(
+            self.new_office_document_completed
+        )
+        self.new_office_worker.start()
+
+    def new_office_document_completed(self, success, message):
+        if success:
+            self.refresh()
+            QMessageBox.information(
+                self,
+                "Nouveau document",
+                message,
+            )
+        else:
+            QMessageBox.critical(
+                self,
+                "Nouveau document",
+                message,
+            )
 
     def create_folder(self):
         if not self.profile or not self.url_stack:
