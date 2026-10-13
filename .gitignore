@@ -75,3 +75,4 @@ config.local.json
 build/
 dist/
 *.spec
+/editions/

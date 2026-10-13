@@ -1,4 +1,6 @@
 import sys
+import hashlib
+import os
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 import shutil
@@ -610,25 +612,50 @@ OFFICE_EXTENSIONS = {
     ".fodt", ".fods", ".fodp",
 }
 
-
 def find_libreoffice():
-    """Recherche LibreOffice sur le PC."""
-    executable = shutil.which("soffice") or shutil.which("soffice.exe")
+    """Recherche le lanceur de LibreOffice sous Windows."""
+    executable = (
+        shutil.which("soffice.com")
+        or shutil.which("soffice.exe")
+        or shutil.which("soffice")
+    )
 
     if executable:
-        return Path(executable)
+        path = Path(executable)
+        console_launcher = path.with_name("soffice.com")
+
+        if console_launcher.is_file():
+            return console_launcher
+
+        return path
 
     candidates = [
+        Path(r"C:\Program Files\LibreOffice\program\soffice.com"),
         Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.com"),
         Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
     ]
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.extend([
+            Path(local_app_data)
+            / "Programs"
+            / "LibreOffice"
+            / "program"
+            / "soffice.com",
+            Path(local_app_data)
+            / "Programs"
+            / "LibreOffice"
+            / "program"
+            / "soffice.exe",
+        ])
 
     for candidate in candidates:
         if candidate.is_file():
             return candidate
 
     return None
-
 
 class PreviewWorker(QThread):
     """Récupère temporairement un fichier et prépare son aperçu."""
@@ -743,6 +770,191 @@ class PreviewWorker(QThread):
             shutil.rmtree(temp_dir, ignore_errors=True)
             self.failed.emit(str(exc))
 
+def file_sha256(path):
+    """Calcule l'empreinte d'un fichier pour détecter les modifications."""
+    digest = hashlib.sha256()
+
+    with Path(path).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+class OfficeEditWorker(QThread):
+    """Ouvre un document dans LibreOffice puis synchronise les modifications."""
+
+    progress = Signal(int, str)
+    editor_started = Signal(str)
+    sync_started = Signal(str)
+    completed = Signal(dict)
+
+    def __init__(self, item, profile, parent=None):
+        super().__init__(parent)
+        self.item = dict(item)
+        self.profile = {
+            "username": profile["username"],
+            "password": profile["password"],
+        }
+
+    def run(self):
+        name = self.item["name"]
+        edition_dir = None
+        local_path = None
+        original_hash = None
+        keep_copy = False
+
+        result = {
+            "ok": False,
+            "name": name,
+            "changed": False,
+            "error": "",
+        }
+
+        try:
+            soffice = find_libreoffice()
+
+            if soffice is None:
+                raise RuntimeError(
+                    "LibreOffice est introuvable sur ce poste. "
+                    "Vérifie qu'il est installé et accessible."
+                )
+
+            editions_root = application_root() / "editions"
+            editions_root.mkdir(parents=True, exist_ok=True)
+
+            edition_dir = Path(
+                tempfile.mkdtemp(
+                    prefix="nuage-edition-",
+                    dir=editions_root,
+                )
+            )
+
+            local_name = Path(name).name
+            local_path = edition_dir / local_name
+
+            self.progress.emit(0, f"Téléchargement de {name}…")
+
+            download_file(
+                self.item["url"],
+                self.profile["username"],
+                self.profile["password"],
+                local_path,
+                lambda percent: self.progress.emit(
+                    percent, f"Téléchargement de {name}…"
+                ),
+            )
+
+            original_hash = file_sha256(local_path)
+
+            # Profil séparé : évite de confier ce document à une session
+            # LibreOffice déjà ouverte, dont le processus pourrait se terminer
+            # avant la fermeture réelle du document.
+            profile_dir = edition_dir / "lo-profile"
+            profile_dir.mkdir()
+
+            command = [
+                str(soffice),
+                f"-env:UserInstallation={profile_dir.as_uri()}",
+                "--nologo",
+                "--nodefault",
+                "--norestore",
+                "--nofirststartwizard",
+                str(local_path),
+            ]
+
+            creationflags = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if soffice.suffix.lower() == ".com"
+                else 0
+            )
+
+            process = subprocess.Popen(
+                command,
+                cwd=str(edition_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+
+            self.editor_started.emit(name)
+
+            # Le thread attend pendant que l'utilisateur travaille.
+            # L'interface Nuage Explorer reste réactive.
+            process.wait()
+
+            if not local_path.is_file():
+                raise RuntimeError(
+                    "Le fichier local n'existe plus après la fermeture "
+                    "de LibreOffice."
+                )
+
+            current_hash = file_sha256(local_path)
+            changed = current_hash != original_hash
+            result["changed"] = changed
+
+            if changed:
+                self.sync_started.emit(name)
+                self.progress.emit(
+                    0,
+                    f"Envoi des modifications de {name} vers NUAGE…",
+                )
+
+                remote = urlsplit(self.item["url"])
+                parent_path = remote.path.rsplit("/", 1)[0] + "/"
+                parent_url = remote._replace(
+                    path=parent_path,
+                    query="",
+                    fragment="",
+                ).geturl()
+
+                upload_file(
+                    local_path,
+                    parent_url,
+                    self.profile["username"],
+                    self.profile["password"],
+                    progress_callback=lambda percent: self.progress.emit(
+                        percent,
+                        f"Envoi des modifications de {name} vers NUAGE…",
+                    ),
+                    overwrite=True,
+                )
+
+            result["ok"] = True
+
+        except Exception as exc:
+            # En cas d'échec de synchronisation, ne jamais supprimer
+            # une copie locale contenant des changements.
+            changed = False
+
+            if (
+                local_path is not None
+                and local_path.is_file()
+                and original_hash is not None
+            ):
+                try:
+                    changed = file_sha256(local_path) != original_hash
+                except OSError:
+                    changed = True
+
+            result["changed"] = changed
+            result["error"] = str(exc)
+
+            if changed:
+                keep_copy = True
+                result["error"] += (
+                    "\n\nLa copie modifiée a été conservée sur la clé USB :\n"
+                    f"{local_path}\n\n"
+                    "Ne la supprime pas avant d'avoir récupéré "
+                    "tes modifications."
+                )
+
+        finally:
+            if edition_dir is not None and not keep_copy:
+                shutil.rmtree(edition_dir, ignore_errors=True)
+
+            self.completed.emit(result)
 
 class PreviewDialog(QDialog):
     """Affiche une image ou un document PDF dans une fenêtre intégrée."""
@@ -1064,6 +1276,8 @@ class MainWindow(QMainWindow):
         self.preview_progress_dialog = None
         self.preview_item_name = ""
         self.transfer_action_label = "Opération WebDAV"
+        self.office_edit_worker = None
+        self.office_edit_progress_dialog = None
 
         # Presse-papiers interne à Nuage Explorer.
         self.clipboard_items = []
@@ -1470,6 +1684,9 @@ class MainWindow(QMainWindow):
 
         suffix = Path(data["name"]).suffix.lower()
 
+        if suffix in OFFICE_EXTENSIONS:
+            self.edit_office_file(data)
+            return
         if (
             suffix not in IMAGE_EXTENSIONS
             and suffix != ".pdf"
@@ -1545,6 +1762,167 @@ class MainWindow(QMainWindow):
         )
 
         self.preview_worker.start()
+
+    def edit_office_file(self, data):
+        if (
+            self.office_edit_worker is not None
+            and self.office_edit_worker.isRunning()
+        ):
+            QMessageBox.information(
+                self,
+                "Édition en cours",
+                "Ferme le document LibreOffice actuel et attends "
+                "la fin de la synchronisation avant d'en ouvrir un autre.",
+            )
+            return
+
+        if find_libreoffice() is None:
+            QMessageBox.warning(
+                self,
+                "LibreOffice introuvable",
+                "LibreOffice n'a pas été détecté sur ce poste.\n\n"
+                "Vérifie qu'il est installé et accessible.",
+            )
+            return
+
+        self.office_edit_progress_dialog = QProgressDialog(
+            f"Téléchargement de {data['name']}…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.office_edit_progress_dialog.setWindowTitle(
+            "Ouverture dans LibreOffice"
+        )
+        self.office_edit_progress_dialog.setCancelButton(None)
+        self.office_edit_progress_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.office_edit_progress_dialog.setMinimumDuration(300)
+        self.office_edit_progress_dialog.setValue(0)
+        self.office_edit_progress_dialog.show()
+
+        self.office_edit_worker = OfficeEditWorker(
+            data,
+            self.profile,
+            self,
+        )
+
+        self.office_edit_worker.progress.connect(
+            self.office_edit_progress
+        )
+        self.office_edit_worker.editor_started.connect(
+            self.office_editor_started
+        )
+        self.office_edit_worker.sync_started.connect(
+            self.office_sync_started
+        )
+        self.office_edit_worker.completed.connect(
+            self.office_edit_completed
+        )
+        self.office_edit_worker.finished.connect(
+            self.office_edit_thread_finished
+        )
+
+        self.office_edit_worker.start()
+
+    def office_edit_progress(self, percent, message):
+        self.status_label.setText(message)
+
+        if self.office_edit_progress_dialog is not None:
+            self.office_edit_progress_dialog.setLabelText(message)
+            self.office_edit_progress_dialog.setValue(percent)
+
+    def office_editor_started(self, name):
+        if self.office_edit_progress_dialog is not None:
+            self.office_edit_progress_dialog.close()
+            self.office_edit_progress_dialog = None
+
+        self.status_label.setText(
+            f"{name} ouvert dans LibreOffice. "
+            "Ferme LibreOffice pour synchroniser les modifications."
+        )
+
+    def office_sync_started(self, name):
+        self.office_edit_progress_dialog = QProgressDialog(
+            f"Envoi des modifications de {name} vers NUAGE…",
+            None,
+            0,
+            100,
+            self,
+        )
+        self.office_edit_progress_dialog.setWindowTitle(
+            "Synchronisation NUAGE"
+        )
+        self.office_edit_progress_dialog.setCancelButton(None)
+        self.office_edit_progress_dialog.setWindowModality(
+            Qt.WindowModality.WindowModal
+        )
+        self.office_edit_progress_dialog.setMinimumDuration(300)
+        self.office_edit_progress_dialog.setValue(0)
+        self.office_edit_progress_dialog.show()
+
+    def office_edit_completed(self, result):
+        if self.office_edit_progress_dialog is not None:
+            self.office_edit_progress_dialog.close()
+            self.office_edit_progress_dialog = None
+
+        if result["ok"]:
+            self.refresh()
+
+            if result["changed"]:
+                self.status_label.setText(
+                    f"✓  Modifications de {result['name']} envoyées vers NUAGE."
+                )
+                QMessageBox.information(
+                    self,
+                    "Synchronisation terminée",
+                    f"Les modifications de « {result['name']} » "
+                    "ont été envoyées vers NUAGE.",
+                )
+            else:
+                self.status_label.setText(
+                    f"Aucune modification détectée dans {result['name']}."
+                )
+                QMessageBox.information(
+                    self,
+                    "Document fermé",
+                    f"Aucune modification détectée dans « {result['name']} ».\n\n"
+                    "Le fichier distant n'a pas été remplacé.",
+                )
+
+        else:
+            self.status_label.setText(
+                f"Échec de l'édition ou de la synchronisation : {result['name']}"
+            )
+            QMessageBox.warning(
+                self,
+                "Synchronisation impossible",
+                f"Le document « {result['name']} » n'a pas pu être "
+                f"synchronisé.\n\n{result['error']}",
+            )
+
+    def closeEvent(self, event):
+        if (
+            self.office_edit_worker is not None
+            and self.office_edit_worker.isRunning()
+        ):
+            QMessageBox.warning(
+                self,
+                "Édition en cours",
+                "Un document est encore ouvert dans LibreOffice "
+                "ou sa synchronisation est en cours.\n\n"
+                "Ferme LibreOffice et attends la fin de la "
+                "synchronisation avant de quitter Nuage Explorer.",
+            )
+            event.ignore()
+            return
+
+        super().closeEvent(event)
+
+    def office_edit_thread_finished(self):
+        self.office_edit_worker = None
 
     def preview_progress(self, percent, message):
         if self.preview_progress_dialog is not None:
