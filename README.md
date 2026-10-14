@@ -19,7 +19,9 @@ src/
     ├── preview_office.py     # aperçus et fonctions LibreOffice
     ├── remote_operations.py  # menu contextuel, couper/copier, renommer/supprimer
     ├── transfers.py          # téléchargements, envois et glisser-déposer
-    └── folder_operations.py  # création de dossiers distants
+    ├── folder_operations.py  # création de dossiers distants
+    ├── storage.py            # récupération du quota
+    └── storage_widget.py      # affichage du quota
 ```
 
 Le dossier `.venv` peut être recréé. **Le fichier `requirements.txt`, lui, doit être conservé avec le projet** : il permet de réinstaller les dépendances Python si l'environnement disparaît.

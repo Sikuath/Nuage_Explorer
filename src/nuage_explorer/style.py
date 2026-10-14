@@ -468,4 +468,158 @@ QToolTip {
     padding: 6px 8px;
     border-radius: 5px;
 }
+
+/* ==================================================
+   THÈME SOMBRE : ZONE CENTRALE
+   ================================================== */
+
+QMainWindow,
+QWidget#central {
+    background-color: #17263d;
+    color: #dce6f4;
+}
+
+/* Textes de la zone centrale */
+
+QWidget#central QLabel {
+    color: #dce6f4;
+    background-color: transparent;
+}
+
+QWidget#central QLabel#appTitle {
+    color: #ffffff;
+    font-size: 23pt;
+    font-weight: 700;
+}
+
+QWidget#central QLabel#muted {
+    color: #9aacc5;
+    font-size: 9pt;
+}
+
+/* Boutons centraux */
+
+QWidget#central QPushButton {
+    color: #dce6f4;
+    background-color: #263b59;
+    border: 1px solid #405675;
+    border-radius: 8px;
+    padding: 9px 13px;
+    min-height: 19px;
+}
+
+QWidget#central QPushButton:hover {
+    color: #ffffff;
+    background-color: #304968;
+    border-color: #6486ae;
+}
+
+QWidget#central QPushButton:pressed {
+    background-color: #315783;
+}
+
+QWidget#central QPushButton:disabled {
+    color: #71839d;
+    background-color: #202f46;
+    border-color: #30425d;
+}
+
+/* Bouton principal d'importation */
+
+QWidget#central QPushButton#primary {
+    color: #ffffff;
+    background-color: #3478c5;
+    border: 1px solid #438bd8;
+    font-weight: 600;
+}
+
+QWidget#central QPushButton#primary:hover {
+    background-color: #438bd8;
+    border-color: #65a9f3;
+}
+
+/* Tableau de fichiers */
+
+QWidget#central QTableWidget {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    alternate-background-color: #223650;
+    border: 1px solid #354b68;
+    border-radius: 10px;
+    gridline-color: transparent;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QWidget#central QTableWidget::item {
+    color: #dce6f4;
+    padding: 8px;
+    border: none;
+}
+
+QWidget#central QTableWidget::item:hover {
+    background-color: #293f5c;
+    color: #ffffff;
+}
+
+QWidget#central QTableWidget::item:selected {
+    background-color: #315783;
+    color: #ffffff;
+}
+
+QWidget#central QHeaderView::section {
+    color: #aebed3;
+    background-color: #263b59;
+    font-weight: 600;
+    padding: 11px 9px;
+    border: none;
+    border-bottom: 1px solid #405675;
+}
+
+/* Barre d'état */
+
+QWidget#central QLabel#status {
+    color: #c8d6e8;
+    background-color: #223650;
+    border: 1px solid #354b68;
+    border-radius: 8px;
+    padding: 10px 13px;
+}
+
+/* Barre de progression */
+
+QWidget#central QProgressBar {
+    color: #ffffff;
+    background-color: #30425d;
+    border: none;
+    border-radius: 4px;
+}
+
+QWidget#central QProgressBar::chunk {
+    background-color: #65a9f3;
+    border-radius: 4px;
+}
+
+/* Champs de saisie centraux */
+
+QWidget#central QLineEdit,
+QWidget#central QTextEdit,
+QWidget#central QPlainTextEdit,
+QWidget#central QComboBox {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #405675;
+    border-radius: 7px;
+    padding: 8px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QWidget#central QLineEdit:focus,
+QWidget#central QTextEdit:focus,
+QWidget#central QPlainTextEdit:focus,
+QWidget#central QComboBox:focus {
+    border: 1px solid #65a9f3;
+}
+
 """
