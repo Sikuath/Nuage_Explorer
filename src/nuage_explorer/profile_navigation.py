@@ -34,6 +34,7 @@ class ProfileNavigationMixin:
 
         self.vault_data = new_data
         self.profile = new_profile
+        self.storage_widget.set_profile(self.profile)
         self.url_stack = [self.profile["url"]]
         self.rebuild_tree()
         self.account_label.setText(f"●  Connecté à Nextcloud\n{self.profile['username']}")
@@ -222,6 +223,7 @@ class ProfileNavigationMixin:
         self.status_label.setText(
             f"✓  {shown} élément(s)   •   Connexion WebDAV réussie • © 2026 Sikuath — Code sous licence MIT"
         )
+        self.storage_widget.refresh()
     def go_up(self):
         if len(self.url_stack) > 1:
             self.url_stack.pop()

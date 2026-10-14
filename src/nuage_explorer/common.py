@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QProgressBar,
     QFormLayout,
     QFrame,
     QHBoxLayout,

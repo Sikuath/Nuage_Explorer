@@ -694,9 +694,9 @@ class ResourceOperationWorker(QThread):
 
 
 class EditionCleanupWorker(QThread):
-    """Supprime au démarrage les copies locales identiques au fichier distant."""
+    """Analyse les copies locales d'édition et ne supprime que les copies identiques au serveur."""
 
-    completed = Signal(int, int)  # supprimés, conservés / non vérifiables
+    completed = Signal(dict)
 
     def __init__(self, profile, parent=None):
         super().__init__(parent)
@@ -707,12 +707,25 @@ class EditionCleanupWorker(QThread):
 
     def run(self):
         editions_root = Path(application_root()) / "editions"
+        result = {
+            "removed": 0,
+            "kept": 0,
+            "checked": 0,
+            "missing_on_server": [],
+            "modified": [],
+            "untracked": [],
+            "errors": [],
+        }
+
         if not editions_root.is_dir():
-            self.completed.emit(0, 0)
+            self.completed.emit(result)
             return
 
-        removed = 0
-        kept = 0
+        # Signale aussi les fichiers directement placés dans editions :
+        # sans edition.json, leur URL distante ne peut pas être déterminée.
+        for path in editions_root.iterdir():
+            if path.is_file() and not path.is_symlink():
+                result["untracked"].append(str(path))
 
         for edition_dir in editions_root.iterdir():
             if not edition_dir.is_dir() or edition_dir.is_symlink():
@@ -720,9 +733,14 @@ class EditionCleanupWorker(QThread):
 
             metadata_path = edition_dir / "edition.json"
             if not metadata_path.is_file():
-                # Les anciens dossiers sans URL connue ne sont jamais effacés :
-                # impossible de comparer leur contenu à la bonne ressource distante.
-                kept += 1
+                # Anciennes copies sans URL : conserver et signaler, jamais supprimer.
+                local_files = [
+                    p for p in edition_dir.iterdir()
+                    if p.is_file() and p.name != "edition.json"
+                ]
+                if local_files:
+                    result["untracked"].extend(str(p) for p in local_files)
+                    result["kept"] += len(local_files)
                 continue
 
             try:
@@ -731,7 +749,33 @@ class EditionCleanupWorker(QThread):
                 filename = metadata["filename"]
                 local_path = edition_dir / filename
                 if not local_path.is_file():
-                    kept += 1
+                    result["errors"].append(
+                        f"{edition_dir}: le fichier local attendu « {filename} » est introuvable."
+                    )
+                    result["kept"] += 1
+                    continue
+
+                result["checked"] += 1
+
+                remote = urlsplit(remote_url)
+                parent_path = remote.path.rsplit("/", 1)[0] + "/"
+                parent_url = remote._replace(
+                    path=parent_path, query="", fragment=""
+                ).geturl()
+
+                remote_entries = list_directory(
+                    parent_url,
+                    self.profile["username"],
+                    self.profile["password"],
+                )
+                remote_names = {
+                    entry.get("name")
+                    for entry in remote_entries
+                    if entry.get("name")
+                }
+                if filename not in remote_names:
+                    result["missing_on_server"].append(str(local_path))
+                    result["kept"] += 1
                     continue
 
                 with tempfile.TemporaryDirectory(prefix="nuage-edition-check-") as temp_dir:
@@ -745,12 +789,13 @@ class EditionCleanupWorker(QThread):
                     )
                     if file_sha256(local_path) == file_sha256(remote_path):
                         shutil.rmtree(edition_dir)
-                        removed += 1
+                        result["removed"] += 1
                     else:
-                        # Contenu différent, serveur inaccessible ou comparaison
-                        # impossible : on conserve par prudence.
-                        kept += 1
-            except Exception:
-                kept += 1
+                        result["modified"].append(str(local_path))
+                        result["kept"] += 1
 
-        self.completed.emit(removed, kept)
+            except Exception as exc:
+                result["kept"] += 1
+                result["errors"].append(f"{edition_dir}: {exc}")
+
+        self.completed.emit(result)

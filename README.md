@@ -4,18 +4,22 @@ Petit gestionnaire de fichiers pour accéder à son espace NUAGE de l'Éducation
 
 ## Structure du projet
 
-À la racine du projet, on doit notamment trouver :
-
 ```text
-Nuage_Explorer/
-├── src/
-│   ├── main.py
-│   ├── webdav.py
-│   └── vault.py
-├── .venv/             # environnement Python (recréable)
-├── requirements.txt   # dépendances Python à sauvegarder
-├── temp/              # fichiers temporaires d'aperçu
-└── README.md
+src/
+├── main.py
+└── nuage_explorer/
+    ├── __init__.py
+    ├── common.py       # imports, accès au coffre, chemins et helpers partagés
+    ├── style.py        # feuille de style Qt
+    ├── workers.py      # workers Qt de transfert et documents Office
+    ├── dialogs.py      # ProfileDialog, PreviewDialog, RemoteFolderDialog
+    ├── widgets.py      # widgets de glisser-déposer
+    ├── main_window.py        # construction de la fenêtre principale
+    ├── profile_navigation.py # profil, arborescence et navigation
+    ├── preview_office.py     # aperçus et fonctions LibreOffice
+    ├── remote_operations.py  # menu contextuel, couper/copier, renommer/supprimer
+    ├── transfers.py          # téléchargements, envois et glisser-déposer
+    └── folder_operations.py  # création de dossiers distants
 ```
 
 Le dossier `.venv` peut être recréé. **Le fichier `requirements.txt`, lui, doit être conservé avec le projet** : il permet de réinstaller les dépendances Python si l'environnement disparaît.

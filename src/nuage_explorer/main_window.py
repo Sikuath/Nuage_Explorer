@@ -12,6 +12,7 @@ from .preview_office import PreviewOfficeMixin
 from .remote_operations import RemoteOperationsMixin
 from .transfers import TransfersMixin
 from .folder_operations import FolderOperationsMixin
+from .storage_widget import StorageWidget
 
 class MainWindow(
     ProfileNavigationMixin,
@@ -74,6 +75,8 @@ class MainWindow(
         # Barre latérale
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
+        sidebar.setMinimumWidth(245)
+        sidebar.setMaximumWidth(290)
         sidebar.setFixedWidth(270)
 
         side = QVBoxLayout(sidebar)
@@ -93,6 +96,7 @@ class MainWindow(
         local_label.setObjectName("muted")
         side.addWidget(local_label)
 
+
         self.local_model = QFileSystemModel(self)
         self.local_model.setFilter(
             QDir.Filter.AllEntries
@@ -104,6 +108,8 @@ class MainWindow(
         self.local_tree = LocalDropTreeView()
         self.local_tree.setObjectName("localTree")
         self.local_tree.setModel(self.local_model)
+
+        # Afficher les lecteurs Windows, y compris les clés USB
         self.local_tree.setRootIndex(self.local_model.index(""))
         self.local_tree.setHeaderHidden(True)
         self.local_tree.setIndentation(15)
@@ -111,12 +117,17 @@ class MainWindow(
         self.local_tree.setUniformRowHeights(True)
         self.local_tree.setMinimumHeight(150)
 
-        # Afficher uniquement les noms des dossiers et des lecteurs
+        # Une seule colonne : noms des lecteurs et des dossiers
         for column in range(1, self.local_model.columnCount()):
             self.local_tree.hideColumn(column)
+
+        # Développer automatiquement les lecteurs lorsqu'on les sélectionne
+        self.local_tree.setExpandsOnDoubleClick(True)
+
         self.local_tree.remote_items_dropped.connect(
             self.download_dropped_to_local
         )
+
         side.addWidget(self.local_tree, 1)
 
         # Séparateur visuel
@@ -125,6 +136,7 @@ class MainWindow(
         separator.setFrameShape(QFrame.Shape.HLine)
         separator.setFixedHeight(1)
         side.addWidget(separator)
+
 
         # --------------------------------------------------
         # NEXTCLOUD : conserver l'arborescence existante
@@ -151,25 +163,31 @@ class MainWindow(
 
         self.tree_root = None
 
-        # Compte et connexion
-        self.settings_button = QPushButton("⚙   Compte et connexion")
-        self.settings_button.setObjectName("navButton")
-        self.settings_button.clicked.connect(self.configure_profile)
-        side.addWidget(self.settings_button)
-
-        self.account_label = QLabel("●  Non connecté")
+        # --------------------------------------------------
+        # COMPTE ET STOCKAGE : bloc ancré en bas
+        # --------------------------------------------------
+        self.account_label = QLabel("⚙ Non connecté")
         self.account_label.setObjectName("muted")
         self.account_label.setWordWrap(True)
         side.addWidget(self.account_label)
 
-        root.addWidget(sidebar)
+        self.storage_widget = StorageWidget(self)
+        side.addWidget(self.storage_widget)
 
+        # Espace flexible avant le bouton pour le maintenir en bas
+        
+        self.settings_button = QPushButton("⚙ Compte et connexion")
+        self.settings_button.setObjectName("navButton")
+        self.settings_button.clicked.connect(self.configure_profile)
+        side.addWidget(self.settings_button)
+
+        root.addWidget(sidebar)
 
         # Zone principale
         content = QWidget()
         main = QVBoxLayout(content)
-        main.setContentsMargins(26, 22, 26, 18)
-        main.setSpacing(15)
+        main.setContentsMargins(28, 24, 28, 20)
+        main.setSpacing(17)
         root.addWidget(content, 1)
 
         top = QHBoxLayout()
@@ -179,19 +197,18 @@ class MainWindow(
         heading.setObjectName("appTitle")
         heading_box.addWidget(heading)
 
-        self.subtitle = QLabel("Tes documents, accessibles depuis Nextcloud")
+        self.subtitle = QLabel("Documents, accessibles depuis Nextcloud")
         self.subtitle.setObjectName("muted")
         heading_box.addWidget(self.subtitle)
 
         top.addLayout(heading_box)
         top.addStretch()
 
-        self.upload_button = QPushButton("↑  Importer des fichiers")
-        self.upload_button.setObjectName("primary")
+        self.upload_button = QPushButton("📂  Importer des fichiers")
         self.upload_button.clicked.connect(self.import_file)
         top.addWidget(self.upload_button)
 
-        self.mkdir_button = QPushButton("+  Nouveau dossier")
+        self.mkdir_button = QPushButton("📂  Nouveau dossier")
         self.mkdir_button.clicked.connect(self.create_folder)
         top.addWidget(self.mkdir_button)
 
@@ -205,9 +222,9 @@ class MainWindow(
         path_bar = QHBoxLayout()
         path_bar.setSpacing(8)
 
-        self.back_button = QPushButton("←")
-        self.back_button.setToolTip("Dossier parent")
-        self.back_button.setFixedWidth(42)
+        self.back_button = QPushButton("←  Retour")
+        self.back_button.setToolTip("Remonter au dossier parent")
+        self.back_button.setMinimumWidth(95)
         self.back_button.clicked.connect(self.go_up)
         path_bar.addWidget(self.back_button)
 
@@ -253,19 +270,23 @@ class MainWindow(
 
         # Connexion initiale
         if self.profile:
+            self.storage_widget.set_profile(self.profile)
             self.url_stack = [self.profile["url"]]
             self.rebuild_tree()
             self.account_label.setText(
-                f"●  Connecté à Nextcloud\n{self.profile['username']}"
+                f"⚙ Connecté à Nextcloud\n{self.profile['username']}"
             )
             self.refresh()
             self.start_edition_cleanup()
+
         else:
             self.path_label.setText("Configure ton compte pour commencer")
             self.status_label.setText(
                 "Aucun compte configuré. Ouvre « Compte et connexion »."
             )
-
+    def closeEvent(self, event):
+        self.storage_widget.shutdown()
+        super().closeEvent(event)
 
     def start_edition_cleanup(self):
         """Compare les copies d'édition au serveur sans bloquer l'interface."""
@@ -283,8 +304,54 @@ class MainWindow(
         )
         self.edition_cleanup_worker.start()
 
-    def edition_cleanup_completed(self, removed, kept):
+    def edition_cleanup_completed(self, result):
+        """Affiche le résultat du contrôle des copies locales."""
+        removed = result.get("removed", 0)
+        kept = result.get("kept", 0)
+        checked = result.get("checked", 0)
+        missing = result.get("missing_on_server", [])
+        modified = result.get("modified", [])
+        untracked = result.get("untracked", [])
+        errors = result.get("errors", [])
+
+        self.status_label.setText(
+            f"Contrôle des éditions terminé : {checked} vérifiée(s), "
+            f"{removed} supprimée(s), {kept} conservée(s)."
+        )
+
+        sections = []
         if removed:
-            self.status_label.setText(
-                f"Nettoyage des éditions : {removed} copie(s) identique(s) au serveur supprimée(s)."
+            sections.append(
+                f"{removed} copie(s) identique(s) à NUAGE supprimée(s) "
+                "après comparaison de leur empreinte SHA-256."
+            )
+        if missing:
+            sections.append(
+                "Fichier(s) local(aux) dont la ressource distante semble absente "
+                "du dossier NUAGE correspondant — copie(s) conservée(s) :\n"
+                + "\n".join(f"• {path}" for path in missing)
+            )
+        if modified:
+            sections.append(
+                "Fichier(s) différent(s) de la version actuellement sur NUAGE "
+                "— copie(s) conservée(s) :\n"
+                + "\n".join(f"• {path}" for path in modified)
+            )
+        if untracked:
+            sections.append(
+                "Fichier(s) sans métadonnées edition.json : impossible de les "
+                "comparer automatiquement, ils ont été conservés :\n"
+                + "\n".join(f"• {path}" for path in untracked)
+            )
+        if errors:
+            sections.append(
+                "Contrôle impossible pour les éléments suivants (conservés par prudence) :\n"
+                + "\n".join(f"• {error}" for error in errors)
+            )
+
+        if sections:
+            QMessageBox.information(
+                self,
+                "Contrôle du dossier editions",
+                "\n\n".join(sections),
             )
