@@ -1,5 +1,6 @@
 """Boîtes de dialogue de l’application."""
 from .common import *
+from .style import STYLE
 
 class ProfileDialog(QDialog):
     def __init__(self, profile=None, parent=None):
@@ -140,7 +141,9 @@ class PreviewDialog(QDialog):
         self.pdf_document = None
         
         self.setWindowTitle(f"Aperçu — {original_name}")
-
+        self.setObjectName("previewDialog")
+        self.setStyleSheet(STYLE)
+        
         # Autoriser la maximisation et la minimisation de la fenêtre.
         self.setWindowFlags(
             self.windowFlags()

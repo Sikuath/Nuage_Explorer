@@ -622,4 +622,43 @@ QWidget#central QComboBox:focus {
     border: 1px solid #65a9f3;
 }
 
+    /* ==================================================
+       FENÊTRE D'APERÇU
+       ================================================== */
+
+    QDialog#previewDialog {
+        background-color: #17263d;
+        color: #dce6f4;
+    }
+
+    QDialog#previewDialog QLabel {
+        color: #dce6f4;
+        background-color: transparent;
+    }
+
+    QDialog#previewDialog QPdfView {
+        background-color: #1d2e47;
+        border: 1px solid #354b68;
+        border-radius: 8px;
+    }
+
+    QDialog#previewDialog QPushButton {
+        color: #dce6f4;
+        background-color: #263b59;
+        border: 1px solid #405675;
+        border-radius: 8px;
+        padding: 8px 14px;
+        min-height: 20px;
+    }
+
+    QDialog#previewDialog QPushButton:hover {
+        color: #ffffff;
+        background-color: #304968;
+        border-color: #6486ae;
+    }
+
+    QDialog#previewDialog QPushButton:pressed {
+        background-color: #315783;
+    }
+
 """
