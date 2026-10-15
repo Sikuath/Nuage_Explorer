@@ -94,6 +94,38 @@ class ProfileDialog(QDialog):
         )
         self.accept()
 
+class ZoomablePdfView(QPdfView):
+    """Zoom avec Ctrl + molette, défilement normal sinon."""
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+
+            if delta == 0:
+                event.ignore()
+                return
+
+            current_zoom = self.zoomFactor()
+
+            # Passer du zoom automatique au zoom manuel.
+            if self.zoomMode() != QPdfView.ZoomMode.Custom:
+                self.setZoomMode(QPdfView.ZoomMode.Custom)
+                current_zoom = self.zoomFactor()
+
+            # Zoom progressif, limité entre 25 % et 500 %.
+            if delta > 0:
+                new_zoom = current_zoom * 1.15
+            else:
+                new_zoom = current_zoom / 1.15
+
+            new_zoom = max(0.25, min(5.0, new_zoom))
+            self.setZoomFactor(new_zoom)
+
+            event.accept()
+            return
+
+        # Sans Ctrl, comportement normal : défilement du document.
+        super().wheelEvent(event)
 
 class PreviewDialog(QDialog):
     """Affiche une image ou un document PDF dans une fenêtre intégrée."""
@@ -106,8 +138,16 @@ class PreviewDialog(QDialog):
         self.temp_dir = Path(temp_dir)
         self.original_pixmap = None
         self.pdf_document = None
-
+        
         self.setWindowTitle(f"Aperçu — {original_name}")
+
+        # Autoriser la maximisation et la minimisation de la fenêtre.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
+
         self.resize(1000, 750)
         self.setMinimumSize(500, 350)
 
@@ -155,7 +195,7 @@ class PreviewDialog(QDialog):
                     "Le fichier est peut-être endommagé ou protégé."
                 )
 
-            self.pdf_view = QPdfView()
+            self.pdf_view = ZoomablePdfView()
             self.pdf_view.setDocument(self.pdf_document)
             self.pdf_view.setPageMode(
                 QPdfView.PageMode.MultiPage
