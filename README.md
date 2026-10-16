@@ -1,33 +1,91 @@
 # Nuage Explorer
 
-Petit gestionnaire de fichiers pour accéder à son espace NUAGE de l'Éducation nationale via WebDAV, avec aperçu des documents.
+Petit gestionnaire de fichiers pour accéder à son espace NUAGE de l'Éducation nationale via WebDAV, avec aperçu des documents ainsi que sa messagerie académique.
 
 ## Structure du projet
 
 ```text
 src/
-├── main.py
+├── main.py                   # fichier principal
+├── vault.py                  # gestion du coffre fort
+├──webdav.py                  # gestion de la communication avec nextcloud
 └── nuage_explorer/
     ├── __init__.py
-    ├── common.py       # imports, accès au coffre, chemins et helpers partagés
-    ├── style.py        # feuille de style Qt
-    ├── workers.py      # workers Qt de transfert et documents Office
-    ├── dialogs.py      # ProfileDialog, PreviewDialog, RemoteFolderDialog
-    ├── widgets.py      # widgets de glisser-déposer
+    ├── common.py             # imports, accès au coffre, chemins et helpers partagés
+    ├── contacts.py           # gestion du carnet d'adresses distant
+    ├── dialogs.py            # ProfileDialog, PreviewDialog, RemoteFolderDialog
+    ├── folder_operations.py  # création de dossiers distants
     ├── main_window.py        # construction de la fenêtre principale
-    ├── profile_navigation.py # profil, arborescence et navigation
+    ├── messagerie.py         # gestion de la messagerie academique
     ├── preview_office.py     # aperçus et fonctions LibreOffice
     ├── printing.py           # Module impression des pdf
+    ├── profile_navigation.py # profil, arborescence et navigation
     ├── remote_operations.py  # menu contextuel, couper/copier, renommer/supprimer
-    ├── transfers.py          # téléchargements, envois et glisser-déposer
-    ├── folder_operations.py  # création de dossiers distants
     ├── storage.py            # récupération du quota
-    └── storage_widget.py      # affichage du quota
+    ├── storage_widget.py     # affichage du quota
+    ├── style.py              # feuille de style Qt
+    ├── transfers.py          # téléchargements, envois et glisser-déposer
+    ├── widgets.py            # widgets de glisser-déposer
+    └── workers.py            # workers Qt de transfert et documents Office
+    
 ```
 
 Le dossier `.venv` peut être recréé. **Le fichier `requirements.txt`, lui, doit être conservé avec le projet** : il permet de réinstaller les dépendances Python si l'environnement disparaît.
 
+## Messagerie intégrée
+
+Nuage Explorer intègre une fenêtre de messagerie permettant de consulter et d'envoyer des courriels directement depuis l'application, sans fermer l'explorateur de fichiers.
+
+## Fonctionnalités
+
+Configuration du compte mail : paramètres IMAP et SMTP enregistrés dans le coffre chiffré existant.
+
+Consultation des messages : affichage des dossiers de messagerie, de la liste des messages et de leur contenu.
+
+Gestion des courriels : réponse, réponse à tous, déplacement vers la corbeille et suppression définitive.
+
+Envoi de messages : rédaction, ajout de pièces jointes et envoi via SMTP.
+
+Archivage des messages envoyés : enregistrement dans le dossier des messages envoyés lorsque le serveur IMAP le permet.
+
+Carnet d'adresses partagé : ajout, modification et suppression de contacts, avec suggestions de destinataires lors de la rédaction.
+
+Retour à l'explorateur : la fenêtre de messagerie peut être ouverte indépendamment, tout en conservant Nuage Explorer actif.
+
+## Carnet d'adresses NUAGE
+
+Les contacts sont stockés au format vCard 3.0 dans le fichier :
+
+Mail/contacts.vcf
+
+Ce fichier est hébergé dans l'espace NUAGE de l'utilisateur et peut ainsi être retrouvé depuis les différentes machines utilisant le même espace.
+
+Le fichier est créé automatiquement lors du premier enregistrement des contacts si le dossier Mail existe déjà.
+
+## Configuration requise
+
+Un compte de messagerie compatible IMAP et SMTP.
+
+Un compte NUAGE configuré dans Nuage Explorer, avec accès au dossier Mail.
+
+Une connexion réseau pour consulter les messages et synchroniser le carnet d'adresses.
+
+Les paramètres du compte mail sont protégés par le coffre chiffré de Nuage Explorer. Aucun second mot de passe maître n'est nécessaire.
+
+## Utilisation
+
+Ouvrir Nuage Explorer et déverrouiller le coffre.
+
+Cliquer sur Messagerie.
+
+Configurer le compte IMAP/SMTP lors de la première utilisation.
+
+Consulter les messages ou cliquer sur Nouveau message pour rédiger un courriel.
+
+Utiliser Contacts pour gérer le carnet d'adresses partagé.
+
 ## Important : préparer la récupération pendant que tout fonctionne
+
 
 Depuis la racine du projet, dans PowerShell, exécuter :
 
