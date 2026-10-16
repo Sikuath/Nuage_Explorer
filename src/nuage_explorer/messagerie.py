@@ -4,6 +4,7 @@ Les paramètres et le mot de passe de messagerie sont enregistrés dans le vault
 déjà déverrouillé par Nuage Explorer. Aucun second mot de passe maître n'est demandé.
 """
 import email
+from email.utils import getaddresses, parseaddr
 import imaplib
 import re
 import smtplib
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QTextBrowser,
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QComboBox,
-    QMessageBox, QTextEdit, QSplitter,
+    QMessageBox, QTextEdit, QSplitter, QMenu,
 )
 
 from .common import save_vault, VaultError
@@ -83,6 +84,19 @@ def _message_body(message):
         # distantes et les pixels de suivi sont retirés avant affichage.
         return "\n\n".join(html_parts)
     return "(Ce message ne contient pas de corps texte affichable.)"
+
+
+def _body_as_plain_text(source):
+    """Convertit sommairement un corps HTML en texte pour une réponse citée."""
+    text = source or ""
+    if re.search(r"<\s*(?:html|body|div|p|table|span|h[1-6]|br)\b", text, flags=re.I):
+        text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.I)
+        text = re.sub(r"</\s*(?:p|div|tr|li|h[1-6])\s*>", "\n", text, flags=re.I)
+        text = re.sub(r"<[^>]+>", "", text)
+    import html
+    text = html.unescape(text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    return text.strip()
 
 
 def _prepare_mail_html(source):
@@ -234,11 +248,14 @@ def _list_mailboxes(client):
         is_sent = ("\\sent" in flags or any(token in lowered for token in (
             "sent", "envoy", "outbox", "gesendet", "inviat", "inviati", "éléments envoyés"
         )))
+        is_trash = ("\\trash" in flags or any(token in lowered for token in (
+            "trash", "corbeille", "poubelle", "deleted", "éléments supprimés"
+        )))
         label = "Boîte de réception" if is_inbox else ("Messages envoyés" if is_sent else name)
-        folders.append({"name": name, "label": label, "is_sent": is_sent})
+        folders.append({"name": name, "label": label, "is_sent": is_sent, "is_trash": is_trash})
 
     if not any(folder["name"].casefold() == "inbox" for folder in folders):
-        folders.insert(0, {"name": "INBOX", "label": "Boîte de réception", "is_sent": False})
+        folders.insert(0, {"name": "INBOX", "label": "Boîte de réception", "is_sent": False, "is_trash": False})
     # Évite les doublons et garde en priorité le dossier signalé par le serveur.
     unique = {}
     for folder in folders:
@@ -378,25 +395,168 @@ class MailMessageWorker(QThread):
                     pass
 
 
+class MailReplyDataWorker(QThread):
+    """Récupère les en-têtes et le corps nécessaires à une réponse."""
+    reply_data_ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings, message_id, folder="INBOX", reply_all=False, parent=None):
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.message_id = str(message_id)
+        self.folder = folder
+        self.reply_all = reply_all
+
+    def run(self):
+        client = None
+        try:
+            client = _connect_imap(self.settings)
+            status, _ = client.select(self.folder, readonly=True)
+            if status != "OK":
+                raise RuntimeError(f"Impossible d'ouvrir le dossier IMAP : {self.folder}")
+            status, data = client.fetch(self.message_id.encode("ascii"), "(BODY.PEEK[])")
+            if status != "OK" or not data or not data[0]:
+                raise RuntimeError("Le message n'a pas pu être téléchargé pour préparer la réponse.")
+            parsed = email.message_from_bytes(data[0][1])
+            sender_header = parsed.get("Reply-To") or parsed.get("From", "")
+            sender_addresses = [addr for _, addr in getaddresses([str(sender_header)]) if addr]
+            if not sender_addresses:
+                raise RuntimeError("L'adresse de l'expéditeur est absente ou invalide.")
+            recipients = list(sender_addresses)
+            if self.reply_all:
+                original_headers = [str(parsed.get("To", "")), str(parsed.get("Cc", ""))]
+                own_address = self.settings.get("email", "").casefold()
+                for _, addr in getaddresses(original_headers):
+                    if addr and addr.casefold() != own_address and addr.casefold() not in {x.casefold() for x in recipients}:
+                        recipients.append(addr)
+            subject = _decode_mime(parsed.get("Subject", "")) or "(Sans objet)"
+            if not subject.casefold().startswith("re:"):
+                subject = "Re: " + subject
+            original_body = _body_as_plain_text(_message_body(parsed))
+            date = _decode_mime(parsed.get("Date", ""))
+            quote = "\n".join("> " + line for line in original_body.splitlines())
+            body = f"\n\nLe {date}, {sender_header} a écrit :\n{quote}" if original_body else f"\n\n--- Message d'origine ---\nDe : {sender_header}\nDate : {date}"
+            result = {
+                "to": ", ".join(recipients),
+                "subject": subject,
+                "body": body,
+                "in_reply_to": parsed.get("Message-ID", ""),
+                "references": " ".join(x for x in (parsed.get("References", ""), parsed.get("Message-ID", "")) if x).strip(),
+            }
+            self.reply_data_ready.emit(result)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+
+
+class MailActionWorker(QThread):
+    """Déplace un message dans la corbeille ou le supprime définitivement."""
+    action_done = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, settings, folder, message_id, operation, trash_folder=None, parent=None):
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.folder = folder
+        self.message_id = str(message_id)
+        self.operation = operation
+        self.trash_folder = trash_folder
+
+    def run(self):
+        client = None
+        try:
+            client = _connect_imap(self.settings)
+            status, _ = client.select(self.folder)
+            if status != "OK":
+                raise RuntimeError(f"Impossible d'ouvrir le dossier IMAP : {self.folder}")
+
+            # La liste utilise des numéros de séquence, alors que les opérations
+            # UID sont plus sûres si la boîte reçoit de nouveaux messages entre-temps.
+            status, uid_data = client.fetch(self.message_id.encode("ascii"), "(UID)")
+            if status != "OK" or not uid_data or not uid_data[0]:
+                raise RuntimeError("Impossible d'identifier le message sur le serveur IMAP.")
+            uid_match = re.search(rb"\bUID\s+(\d+)", uid_data[0][0] if isinstance(uid_data[0], tuple) else uid_data[0])
+            if not uid_match:
+                raise RuntimeError("Le serveur IMAP n'a pas fourni l'identifiant unique du message.")
+            uid = uid_match.group(1)
+            capabilities = {
+                cap.decode("ascii", errors="ignore") if isinstance(cap, bytes) else str(cap)
+                for cap in getattr(client, "capabilities", ())
+            }
+            trash_flags = "(\\Deleted)"
+
+            if self.operation == "trash":
+                if not self.trash_folder:
+                    raise RuntimeError("Aucun dossier Corbeille n'a été détecté dans le compte IMAP.")
+                # MOVE est préférable car il déplace le message en une opération.
+                try:
+                    status, _ = client.uid("MOVE", uid, client._quote(self.trash_folder))
+                except Exception:
+                    status = "NO"
+                if status != "OK":
+                    # Repli pour les serveurs sans extension MOVE. UIDPLUS permet
+                    # d'expurger uniquement ce message, sans toucher aux autres.
+                    if "UIDPLUS" not in capabilities:
+                        raise RuntimeError("Le serveur ne prend pas en charge MOVE ni UIDPLUS ; déplacement annulé pour éviter de supprimer d'autres messages marqués.")
+                    status, _ = client.uid("COPY", uid, client._quote(self.trash_folder))
+                    if status != "OK":
+                        raise RuntimeError(f"Impossible de déplacer le message vers {self.trash_folder}.")
+                    status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
+                    if status != "OK":
+                        raise RuntimeError("Le message a été copié dans la corbeille mais n'a pas pu être retiré du dossier d'origine.")
+                    status, _ = client.uid("EXPUNGE", uid)
+                    if status != "OK":
+                        raise RuntimeError("Le message a été copié dans la corbeille, mais son retrait du dossier d'origine a échoué.")
+                self.action_done.emit("trash", self.folder)
+            elif self.operation == "delete":
+                if "UIDPLUS" not in capabilities:
+                    raise RuntimeError("Le serveur ne prend pas en charge UIDPLUS : l'effacement définitif ciblé n'est pas disponible sans risquer de supprimer d'autres messages marqués.")
+                status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
+                if status != "OK":
+                    raise RuntimeError("Le serveur IMAP n'a pas accepté la suppression du message.")
+                if "UIDPLUS" in capabilities:
+                    status, _ = client.uid("EXPUNGE", uid)
+                    if status != "OK":
+                        raise RuntimeError("Le serveur a marqué le message comme supprimé, mais n'a pas confirmé son effacement définitif.")
+                self.action_done.emit("delete", self.folder)
+            else:
+                raise RuntimeError("Opération de messagerie inconnue.")
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+
+
 class SendMailDialog(QDialog):
     """Fenêtre simple de rédaction et d'envoi d'un courriel."""
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, parent=None, draft=None):
         super().__init__(parent)
         self.settings = dict(settings)
-        self.setWindowTitle("Nouveau message")
+        self.draft = dict(draft or {})
+        self.setWindowTitle("Répondre" if self.draft else "Nouveau message")
         self.resize(650, 500)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.to_edit = QLineEdit()
-        self.subject_edit = QLineEdit()
+        self.to_edit = QLineEdit(self.draft.get("to", ""))
+        self.subject_edit = QLineEdit(self.draft.get("subject", ""))
         form.addRow("À :", self.to_edit)
         form.addRow("Objet :", self.subject_edit)
         layout.addLayout(form)
 
         self.body_edit = QTextEdit()
         self.body_edit.setPlaceholderText("Écris ton message…")
+        self.body_edit.setPlainText(self.draft.get("body", ""))
         layout.addWidget(self.body_edit, 1)
 
         buttons = QDialogButtonBox()
@@ -423,6 +583,10 @@ class SendMailDialog(QDialog):
         message["From"] = self.settings["email"]
         message["To"] = recipient
         message["Subject"] = self.subject_edit.text().strip()
+        if self.draft.get("in_reply_to"):
+            message["In-Reply-To"] = self.draft["in_reply_to"]
+        if self.draft.get("references"):
+            message["References"] = self.draft["references"]
         message.set_content(self.body_edit.toPlainText())
 
         try:
@@ -506,7 +670,10 @@ class MessagerieWindow(QMainWindow):
         self.list_worker = None
         self.message_worker = None
         self.folders_worker = None
+        self.reply_worker = None
+        self.action_worker = None
         self.current_folder = "INBOX"
+        self.mail_folders = []
 
         self.setWindowTitle("Messagerie académique — Nuage Explorer")
         self.setStyleSheet(STYLE)
@@ -572,6 +739,8 @@ class MessagerieWindow(QMainWindow):
         self.message_list = QListWidget()
         self.message_list.setMinimumWidth(260)
         self.message_list.currentItemChanged.connect(self.select_message)
+        self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.message_list.customContextMenuRequested.connect(self.show_message_context_menu)
         content_splitter.addWidget(self.message_list)
 
         self.message_view = QTextBrowser()
@@ -643,6 +812,7 @@ class MessagerieWindow(QMainWindow):
     def folders_loaded(self, folders):
         """Affiche les dossiers à gauche avec leur nombre de messages."""
         previous = self.current_folder
+        self.mail_folders = list(folders)
         self.folder_list.blockSignals(True)
         self.folder_list.clear()
 
@@ -759,6 +929,96 @@ class MessagerieWindow(QMainWindow):
         # maintenant le chargement du dossier réellement sélectionné.
         if finished_folder and finished_folder != self.current_folder:
             self.refresh_messages()
+
+    def show_message_context_menu(self, position):
+        """Menu contextuel façon Thunderbird pour le message sélectionné."""
+        item = self.message_list.itemAt(position)
+        if item is None:
+            return
+        self.message_list.setCurrentItem(item)
+        menu = QMenu(self)
+        reply_action = menu.addAction("↩ Répondre à l'expéditeur")
+        reply_all_action = menu.addAction("↩ Répondre à tous")
+        menu.addSeparator()
+        trash_action = menu.addAction("🗑 Déplacer vers la corbeille")
+        delete_action = menu.addAction("✖ Supprimer définitivement")
+        chosen = menu.exec(self.message_list.mapToGlobal(position))
+        message_id = item.data(Qt.ItemDataRole.UserRole)
+        if chosen == reply_action:
+            self.prepare_reply(message_id, reply_all=False)
+        elif chosen == reply_all_action:
+            self.prepare_reply(message_id, reply_all=True)
+        elif chosen == trash_action:
+            self.confirm_message_action(message_id, "trash")
+        elif chosen == delete_action:
+            self.confirm_message_action(message_id, "delete")
+
+    def prepare_reply(self, message_id, reply_all=False):
+        if self.reply_worker is not None and self.reply_worker.isRunning():
+            return
+        self.status_label.setText("Préparation de la réponse…")
+        self.reply_worker = MailReplyDataWorker(
+            self.settings, message_id, folder=self.current_folder,
+            reply_all=reply_all, parent=self
+        )
+        self.reply_worker.reply_data_ready.connect(self.open_reply_dialog)
+        self.reply_worker.failed.connect(self.mail_error)
+        self.reply_worker.finished.connect(self.reply_finished)
+        self.reply_worker.start()
+
+    def open_reply_dialog(self, draft):
+        dialog = SendMailDialog(self.settings, self, draft=draft)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_folders()
+            self.refresh_messages()
+
+    def reply_finished(self):
+        self.reply_worker = None
+
+    def confirm_message_action(self, message_id, operation):
+        if self.action_worker is not None and self.action_worker.isRunning():
+            return
+        if operation == "trash":
+            title = "Mettre à la corbeille"
+            prompt = "Déplacer ce message vers la corbeille ?"
+            trash_folder = next((
+                f["name"] for f in self.mail_folders
+                if f.get("is_trash") or any(word in f["name"].casefold() for word in ("trash", "corbeille", "poubelle", "deleted"))
+            ), None)
+        else:
+            title = "Suppression définitive"
+            prompt = "Supprimer définitivement ce message ? Cette action est irréversible."
+            trash_folder = None
+        answer = QMessageBox.question(
+            self, title, prompt,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_label.setText("Opération sur le message…")
+        self.refresh_button.setEnabled(False)
+        self.action_worker = MailActionWorker(
+            self.settings, self.current_folder, message_id, operation,
+            trash_folder=trash_folder, parent=self
+        )
+        self.action_worker.action_done.connect(self.message_action_done)
+        self.action_worker.failed.connect(self.mail_error)
+        self.action_worker.finished.connect(self.action_finished)
+        self.action_worker.start()
+
+    def message_action_done(self, operation, folder):
+        if operation == "trash":
+            self.status_label.setText("Message déplacé vers la corbeille.")
+        else:
+            self.status_label.setText("Message supprimé définitivement.")
+        self.message_view.clear()
+        self.load_folders()
+        self.refresh_messages()
+
+    def action_finished(self):
+        self.action_worker = None
+        self.refresh_button.setEnabled(True)
 
     def select_message(self, current, previous=None):
         if current is None or not self.settings:
