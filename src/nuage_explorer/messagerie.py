@@ -15,6 +15,7 @@ import time
 from email.header import decode_header
 from email.message import EmailMessage
 from html import escape
+import uuid
 
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (
@@ -434,6 +435,7 @@ class MailListWorker(QThread):
                     "subject": _decode_mime(parsed.get("Subject", "")) or "(Sans objet)",
                     "sender": _decode_mime(parsed.get("From", "")),
                     "to": _decode_mime(parsed.get("To", "")),
+                    "cc": _decode_mime(parsed.get("Cc", "")),
                     "date": _decode_mime(parsed.get("Date", "")),
                 })
             self.messages_ready.emit(results, total, page)
@@ -542,7 +544,6 @@ class MailReplyDataWorker(QThread):
                 except Exception:
                     pass
 
-
 class MailActionWorker(QThread):
     """Déplace un ou plusieurs messages dans la corbeille ou les supprime."""
     action_done = Signal(str, str, int)
@@ -629,8 +630,6 @@ class MailActionWorker(QThread):
                     client.logout()
                 except Exception:
                     pass
-
-
 
 class SendMailDialog(QDialog):
     """Fenêtre de rédaction et d'envoi d'un courriel avec À, Cc et Cci."""
@@ -1034,6 +1033,71 @@ class MailContactsWorker(QThread):
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
+class MailContactsSyncWorker(QThread):
+    """Ajoute au carnet NUAGE les nouvelles adresses trouvées dans les messages."""
+
+    sync_done = Signal(list, int)
+    failed = Signal(str)
+
+    def __init__(self, profile, messages, parent=None):
+        super().__init__(parent)
+        self.profile = dict(profile or {})
+        self.messages = list(messages or [])
+
+    def run(self):
+        try:
+            from .contacts import (
+                load_contacts,
+                save_contacts,
+                DEFAULT_CONTACT_GROUP,
+            )
+
+            # Toujours repartir du carnet partagé actuel pour ne rien écraser.
+            contacts = load_contacts(self.profile)
+            known = {
+                contact.get("email", "").strip().casefold()
+                for contact in contacts
+                if contact.get("email", "").strip()
+            }
+
+            added = 0
+
+            for message in self.messages:
+                for field in ("sender", "to", "cc"):
+                    header = message.get(field, "")
+                    for name, address in getaddresses([header]):
+                        address = address.strip()
+                        if (
+                            not address
+                            or "@" not in address
+                            or any(char.isspace() for char in address)
+                        ):
+                            continue
+
+                        key = address.casefold()
+                        if key in known:
+                            continue
+
+                        name = _decode_mime(name).strip()
+                        contacts.append({
+                            "uid": uuid.uuid4().hex,
+                            "name": name or address,
+                            "email": address,
+                            "phone": "",
+                            "group": DEFAULT_CONTACT_GROUP,
+                        })
+                        known.add(key)
+                        added += 1
+
+            # N'écrire sur NUAGE que si de nouveaux contacts ont été trouvés.
+            if added:
+                save_contacts(self.profile, contacts)
+
+            self.sync_done.emit(contacts, added)
+
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
 class MessagerieWindow(QMainWindow):
     """Fenêtre indépendante de messagerie, reliée au vault de Nuage Explorer."""
 
@@ -1099,7 +1163,7 @@ class MessagerieWindow(QMainWindow):
         dialog = ContactBookDialog(self.webdav_profile, self)
         dialog.exec()
         self.load_contacts_async()
-        
+
     def __init__(
         self, vault_path, master_password, vault_data,
         parent=None, profile=None
@@ -1117,6 +1181,7 @@ class MessagerieWindow(QMainWindow):
         self.folders_worker = None
         self.reply_worker = None
         self.action_worker = None
+        self.contacts_sync_worker = None
         self.current_folder = "INBOX"
         self.mail_folders = []
         self.page_size = 50
@@ -1232,6 +1297,61 @@ class MessagerieWindow(QMainWindow):
             self.configure_account()
         else:
             self.load_folders()
+
+    def sync_contacts_from_messages(self, messages):
+        """Synchronise les adresses découvertes dans la boîte de réception."""
+        if not self.webdav_profile:
+            return
+
+        # Ne découvrir des contacts que dans la boîte de réception.
+        loaded_folder = (
+            self.list_worker.folder
+            if self.list_worker is not None
+            else self.current_folder
+        )
+        if loaded_folder.casefold() != "inbox":
+            return
+
+        if (
+            self.contacts_sync_worker is not None
+            and self.contacts_sync_worker.isRunning()
+        ):
+            return
+
+        self.contacts_sync_worker = MailContactsSyncWorker(
+            self.webdav_profile, messages, parent=self
+        )
+        self.contacts_sync_worker.sync_done.connect(
+            self.contacts_sync_done
+        )
+        self.contacts_sync_worker.failed.connect(
+            self.contacts_sync_failed
+        )
+        self.contacts_sync_worker.finished.connect(
+            self.contacts_sync_finished
+        )
+        self.contacts_sync_worker.start()
+
+
+    def contacts_sync_done(self, contacts, added):
+        """Actualise le cache et signale les nouveaux contacts ajoutés."""
+        self.contacts = list(contacts)
+
+        if added:
+            self.status_label.setText(
+                f"{added} nouveau(x) contact(s) ajouté(s) au carnet NUAGE."
+            )
+
+
+    def contacts_sync_failed(self, message):
+        """Signale l'échec sans interrompre la messagerie."""
+        self.status_label.setText(
+            "Actualisation des contacts impossible ; messagerie disponible."
+        )
+
+
+    def contacts_sync_finished(self):
+        self.contacts_sync_worker = None
 
     def configure_account(self):
         dialog = MailSettingsDialog(self.settings, self)
@@ -1416,6 +1536,7 @@ class MessagerieWindow(QMainWindow):
         )
         if not messages:
             self.message_view.setPlainText(f"Le dossier « {folder_label} » est vide.")
+        self.sync_contacts_from_messages(messages)
 
     def list_finished(self):
         finished_folder = self.list_worker.folder if self.list_worker is not None else None
