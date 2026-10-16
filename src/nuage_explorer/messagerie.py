@@ -6,7 +6,7 @@ déjà déverrouillé par Nuage Explorer. Aucun second mot de passe maître n'es
 import email
 import mimetypes
 import os
-from email.utils import getaddresses, parseaddr
+from email.utils import getaddresses, parseaddr, formataddr
 import imaplib
 import re
 import smtplib
@@ -644,7 +644,19 @@ class SendMailDialog(QDialog):
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        
         self.to_edit = QLineEdit(self.draft.get("to", ""))
+        self.subject_edit = QLineEdit(self.draft.get("subject", ""))
+
+        recipient_row = QHBoxLayout()
+        recipient_row.addWidget(self.to_edit, 1)
+
+        self.contacts_button = QPushButton("👥 Choisir des contacts…")
+        self.contacts_button.clicked.connect(self.choose_contacts)
+        recipient_row.addWidget(self.contacts_button)
+
+        form.addRow("À :", recipient_row)
+
         self.contact_completer = QCompleter(
             [
                 f"{c.get('name', '')} <{c.get('email', '')}>"
@@ -660,8 +672,7 @@ class SendMailDialog(QDialog):
             Qt.MatchFlag.MatchContains
         )
         self.to_edit.setCompleter(self.contact_completer)
-        self.subject_edit = QLineEdit(self.draft.get("subject", ""))
-        form.addRow("À :", self.to_edit)
+        
         form.addRow("Objet :", self.subject_edit)
         layout.addLayout(form)
 
@@ -704,6 +715,75 @@ class SendMailDialog(QDialog):
         self.send_button.clicked.connect(self.send_message)
         self.cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
+    
+    def choose_contacts(self):
+        """Charge le carnet NUAGE et ajoute les contacts sélectionnés."""
+        parent = self.parent()
+        profile = getattr(parent, "webdav_profile", None)
+
+        if not profile:
+            QMessageBox.warning(
+                self,
+                "NUAGE indisponible",
+                "Aucun profil NUAGE actif n'est disponible.",
+            )
+            return
+
+        try:
+            from .contacts import load_contacts, ContactSelectionDialog
+
+            contacts = load_contacts(profile)
+
+            if not contacts:
+                QMessageBox.information(
+                    self,
+                    "Carnet d'adresses",
+                    "Aucun contact disponible dans le carnet NUAGE.",
+                )
+                return
+
+            dialog = ContactSelectionDialog(contacts, self)
+
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            selected = dialog.selected_contacts()
+            if not selected:
+                return
+
+            current_text = self.to_edit.text().strip()
+            existing_addresses = {
+                address.casefold()
+                for _, address in getaddresses([current_text])
+                if address
+            }
+
+            new_entries = []
+
+            for contact in selected:
+                address = (contact.get("email") or "").strip()
+                if not address or address.casefold() in existing_addresses:
+                    continue
+
+                name = (contact.get("name") or "").strip()
+                entry = formataddr((name, address)) if name else address
+
+                new_entries.append(entry)
+                existing_addresses.add(address.casefold())
+
+            if new_entries:
+                addition = ", ".join(new_entries)
+                if current_text:
+                    current_text += ", "
+                self.to_edit.setText(current_text + addition)
+
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Carnet d'adresses indisponible",
+                "Impossible de charger ou de lire les contacts NUAGE.\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
 
     def add_attachments(self):
         paths, _ = QFileDialog.getOpenFileNames(

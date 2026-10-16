@@ -162,6 +162,146 @@ def save_contacts(profile, contacts):
             overwrite=True,
         )
 
+class ContactSelectionDialog(QDialog):
+    """Sélection multiple de contacts pour la rédaction d'un courriel."""
+
+    def __init__(self, contacts, parent=None):
+        super().__init__(parent)
+        self.contacts = list(contacts or [])
+
+        self.setWindowTitle("Choisir les destinataires")
+        self.resize(520, 520)
+
+        layout = QVBoxLayout(self)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            "Rechercher un nom ou une adresse e-mail…"
+        )
+        self.search_edit.textChanged.connect(self.filter_contacts)
+        layout.addWidget(self.search_edit)
+
+        self.contact_list = QListWidget()
+        self.contact_list.setSelectionMode(
+            QListWidget.SelectionMode.NoSelection
+        )
+        layout.addWidget(self.contact_list, 1)
+
+        actions = QHBoxLayout()
+        self.select_all_button = QPushButton("Tout sélectionner")
+        self.select_all_button.clicked.connect(
+            lambda: self.set_all_checked(True)
+        )
+        actions.addWidget(self.select_all_button)
+
+        self.clear_button = QPushButton("Tout décocher")
+        self.clear_button.clicked.connect(
+            lambda: self.set_all_checked(False)
+        )
+        actions.addWidget(self.clear_button)
+        layout.addLayout(actions)
+
+        self.count_label = QLabel()
+        layout.addWidget(self.count_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Ajouter les contacts"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._populate()
+        self.update_count()
+
+    def _populate(self):
+        self.contact_list.clear()
+
+        contacts = sorted(
+            self.contacts,
+            key=lambda c: (
+                c.get("name") or c.get("email") or ""
+            ).casefold(),
+        )
+
+        for contact in contacts:
+            email = (contact.get("email") or "").strip()
+            if not email:
+                continue
+
+            name = (contact.get("name") or "").strip()
+            label = f"{name} <{email}>" if name else email
+
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, contact)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.contact_list.addItem(item)
+
+        self.contact_list.itemChanged.connect(
+            lambda _item: self.update_count()
+        )
+
+    def filter_contacts(self, text):
+        query = text.strip().casefold()
+
+        for index in range(self.contact_list.count()):
+            item = self.contact_list.item(index)
+            contact = item.data(Qt.ItemDataRole.UserRole)
+
+            searchable = (
+                (contact.get("name") or "")
+                + " "
+                + (contact.get("email") or "")
+            ).casefold()
+
+            item.setHidden(query not in searchable)
+
+    def set_all_checked(self, checked):
+        state = (
+            Qt.CheckState.Checked
+            if checked
+            else Qt.CheckState.Unchecked
+        )
+
+        for index in range(self.contact_list.count()):
+            item = self.contact_list.item(index)
+            if not item.isHidden():
+                item.setCheckState(state)
+
+        self.update_count()
+
+    def update_count(self):
+        count = sum(
+            self.contact_list.item(index).checkState()
+            == Qt.CheckState.Checked
+            for index in range(self.contact_list.count())
+        )
+        self.count_label.setText(
+            f"{count} contact(s) sélectionné(s)"
+        )
+
+    def selected_contacts(self):
+        selected = []
+
+        for index in range(self.contact_list.count()):
+            item = self.contact_list.item(index)
+
+            if item.checkState() == Qt.CheckState.Checked:
+                selected.append(
+                    item.data(Qt.ItemDataRole.UserRole)
+                )
+
+        return selected
+
 class ContactEditDialog(QDialog):
     """Formulaire d'ajout ou de modification d'un contact."""
 
