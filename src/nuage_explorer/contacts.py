@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QMessageBox, QDialogButtonBox,
+    QMessageBox, QDialogButtonBox, QComboBox,
 )
 
 from .common import (
@@ -19,7 +19,15 @@ from .common import (
     upload_file,
     WebDAVError,
 )
+CONTACT_GROUPS = [
+    "Physique-chimie",
+    "Administration",
+    "Club astro",
+    "FSU",
+    "Autres",
+]
 
+DEFAULT_CONTACT_GROUP = "Autres"
 
 def _escape_vcard(value):
     return (
@@ -57,6 +65,7 @@ def _parse_vcard(content):
         if line.upper() == "END:VCARD":
             if current and (current.get("email") or current.get("name")):
                 current.setdefault("uid", str(uuid.uuid4()))
+                current.setdefault("group", DEFAULT_CONTACT_GROUP)
                 contacts.append(current)
             current = None
             continue
@@ -75,6 +84,12 @@ def _parse_vcard(content):
             current["email"] = value
         elif key == "TEL":
             current["phone"] = value
+        elif key == "CATEGORIES":
+            group = value.strip()
+            current["group"] = (
+                group if group in CONTACT_GROUPS
+                else DEFAULT_CONTACT_GROUP
+            )
 
     # Évite les doublons d'identifiant.
     unique = {}
@@ -92,6 +107,7 @@ def _make_vcard(contacts):
             "VERSION:3.0",
             f"UID:{_escape_vcard(contact.get('uid') or uuid.uuid4())}",
             f"FN:{_escape_vcard(contact.get('name', ''))}",
+            f"CATEGORIES:{_escape_vcard(contact.get('group', DEFAULT_CONTACT_GROUP))}",
         ])
         if contact.get("email"):
             lines.append(f"EMAIL;TYPE=INTERNET:{_escape_vcard(contact['email'])}")
@@ -181,6 +197,15 @@ class ContactSelectionDialog(QDialog):
         self.search_edit.textChanged.connect(self.filter_contacts)
         layout.addWidget(self.search_edit)
 
+        self.group_filter = QComboBox()
+        self.group_filter.addItem("Tous les groupes", "")
+        for group in CONTACT_GROUPS:
+            self.group_filter.addItem(group, group)
+        self.group_filter.currentIndexChanged.connect(
+            self.filter_by_group
+        )
+        layout.addWidget(self.group_filter)
+
         self.contact_list = QListWidget()
         self.contact_list.setSelectionMode(
             QListWidget.SelectionMode.NoSelection
@@ -250,8 +275,12 @@ class ContactSelectionDialog(QDialog):
             lambda _item: self.update_count()
         )
 
+    def filter_by_group(self, _index=None):
+        self.filter_contacts(self.search_edit.text())
+
     def filter_contacts(self, text):
         query = text.strip().casefold()
+        selected_group = self.group_filter.currentData()
 
         for index in range(self.contact_list.count()):
             item = self.contact_list.item(index)
@@ -263,7 +292,16 @@ class ContactSelectionDialog(QDialog):
                 + (contact.get("email") or "")
             ).casefold()
 
-            item.setHidden(query not in searchable)
+            group = contact.get("group", DEFAULT_CONTACT_GROUP)
+
+            visible = (
+                query in searchable
+                and (
+                    not selected_group
+                    or group == selected_group
+                )
+            )
+            item.setHidden(not visible)
 
     def set_all_checked(self, checked):
         state = (
@@ -319,10 +357,17 @@ class ContactEditDialog(QDialog):
         self.name_edit = QLineEdit(contact.get("name", ""))
         self.email_edit = QLineEdit(contact.get("email", ""))
         self.phone_edit = QLineEdit(contact.get("phone", ""))
+        self.group_combo = QComboBox()
+        self.group_combo.addItems(CONTACT_GROUPS)
+        group = contact.get("group", DEFAULT_CONTACT_GROUP)
+        self.group_combo.setCurrentText(
+            group if group in CONTACT_GROUPS else DEFAULT_CONTACT_GROUP
+        )
 
         form.addRow("Nom et prénom :", self.name_edit)
         form.addRow("Adresse électronique :", self.email_edit)
         form.addRow("Téléphone (facultatif) :", self.phone_edit)
+        form.addRow("Groupe :", self.group_combo)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -339,6 +384,7 @@ class ContactEditDialog(QDialog):
             "name": self.name_edit.text().strip(),
             "email": self.email_edit.text().strip(),
             "phone": self.phone_edit.text().strip(),
+            "group": self.group_combo.currentText(),
         }
 
     def accept(self):
@@ -372,6 +418,14 @@ class ContactBookDialog(QDialog):
         ))
 
         self.contact_list = QListWidget()
+        self.group_filter = QComboBox()
+        self.group_filter.addItem("Tous les groupes", "")
+        for group in CONTACT_GROUPS:
+            self.group_filter.addItem(group, group)
+        self.group_filter.currentIndexChanged.connect(
+            self._refresh_list
+        )
+        layout.addWidget(self.group_filter)
         self.contact_list.itemDoubleClicked.connect(
             lambda _item: self.edit_contact()
         )
@@ -412,17 +466,28 @@ class ContactBookDialog(QDialog):
             )
 
     def _refresh_list(self):
+        selected_group = self.group_filter.currentData()
+
         self.contact_list.clear()
         self.contacts.sort(
             key=lambda c: c.get("name", "").casefold()
         )
+
         for contact in self.contacts:
+            group = contact.get("group", DEFAULT_CONTACT_GROUP)
+
+            if selected_group and group != selected_group:
+                continue
+
             item = QListWidgetItem(
-                f"{contact.get('name', '')}  —  {contact.get('email', '')}"
+                f"{contact.get('name', '')}  —  "
+                f"{contact.get('email', '')}  [{group}]"
             )
             item.setData(Qt.ItemDataRole.UserRole, contact["uid"])
+
             if contact.get("phone"):
                 item.setToolTip(contact["phone"])
+
             self.contact_list.addItem(item)
 
     def _selected_contact(self):
