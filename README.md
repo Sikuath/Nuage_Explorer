@@ -62,6 +62,16 @@ Ce fichier est hébergé dans l'espace NUAGE de l'utilisateur et peut ainsi êtr
 
 Le fichier est créé automatiquement lors du premier enregistrement des contacts si le dossier Mail existe déjà.
 
+Modifier les groupes pour en changer le nombre et le nom dans le fichier contacts.py 
+
+CONTACT_GROUPS = [
+    "Physique-chimie",
+    "Administration",
+    "Club astro",
+    "FSU",
+    "Autres",
+]
+
 ## Configuration requise
 
 Un compte de messagerie compatible IMAP et SMTP.

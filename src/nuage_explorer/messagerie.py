@@ -1015,27 +1015,75 @@ class SendMailDialog(QDialog):
 
         super().accept()
 
+class MailContactsWorker(QThread):
+    """Récupère les contacts partagés sur NUAGE en arrière-plan."""
+
+    contacts_ready = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, profile, parent=None):
+        super().__init__(parent)
+        self.profile = dict(profile or {})
+
+    def run(self):
+        try:
+            from .contacts import load_contacts
+
+            contacts = load_contacts(self.profile)
+            self.contacts_ready.emit(contacts)
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
 class MessagerieWindow(QMainWindow):
     """Fenêtre indépendante de messagerie, reliée au vault de Nuage Explorer."""
 
-    def get_contacts(self):
-        """Charge le carnet partagé ; une erreur est signalée sans bloquer IMAP."""
-        from .contacts import load_contacts
-
+    def load_contacts_async(self):
+        """Actualise en arrière-plan le carnet partagé sur NUAGE."""
         if not self.webdav_profile:
-            return []
+            return
 
-        try:
-            return load_contacts(self.webdav_profile)
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "Carnet d'adresses indisponible",
-                "La messagerie reste utilisable, mais les suggestions de "
-                "contacts ne sont pas disponibles.\n\n"
-                f"{type(exc).__name__}: {exc}",
+        if (
+            self.contacts_worker is not None
+            and self.contacts_worker.isRunning()
+        ):
+            return
+
+        self.contacts_worker = MailContactsWorker(
+            self.webdav_profile, parent=self
+        )
+        self.contacts_worker.contacts_ready.connect(self.contacts_loaded)
+        self.contacts_worker.failed.connect(self.contacts_load_failed)
+        self.contacts_worker.finished.connect(self.contacts_worker_finished)
+        self.contacts_worker.start()
+
+
+    def contacts_loaded(self, contacts):
+        """Conserve les contacts récupérés pour la rédaction des messages."""
+        self.contacts = list(contacts or [])
+
+        # Ne pas écraser un message d'état plus important.
+        if self.status_label.text() == "Prêt":
+            self.status_label.setText(
+                f"Carnet NUAGE chargé : {len(self.contacts)} contact(s)."
             )
-            return []
+
+
+    def contacts_load_failed(self, message):
+        """Une panne NUAGE ne doit pas empêcher l'utilisation de la messagerie."""
+        self.status_label.setText(
+            "Carnet NUAGE indisponible ; messagerie toujours utilisable."
+        )
+
+
+    def contacts_worker_finished(self):
+        self.contacts_worker = None
+
+    
+    
+    def get_contacts(self):
+        """Renvoie les contacts partagés récupérés à l'ouverture."""
+        return list(self.contacts)
+
     def open_contacts(self):
         """Ouvre le carnet d'adresses partagé sur NUAGE."""
         if not self.webdav_profile:
@@ -1050,6 +1098,8 @@ class MessagerieWindow(QMainWindow):
 
         dialog = ContactBookDialog(self.webdav_profile, self)
         dialog.exec()
+        self.load_contacts_async()
+        
     def __init__(
         self, vault_path, master_password, vault_data,
         parent=None, profile=None
@@ -1059,6 +1109,8 @@ class MessagerieWindow(QMainWindow):
         self.master_password = master_password
         self.vault_data = vault_data
         self.webdav_profile = dict(profile or {})
+        self.contacts = []
+        self.contacts_worker = None
         self.settings = dict(vault_data.get("mail_account", {}))
         self.list_worker = None
         self.message_worker = None
@@ -1173,6 +1225,7 @@ class MessagerieWindow(QMainWindow):
 
         self.status_label = QLabel("Prêt")
         self.status_label.setObjectName("status")
+        self.load_contacts_async()
         root.addWidget(self.status_label)
 
         if not self.settings:
