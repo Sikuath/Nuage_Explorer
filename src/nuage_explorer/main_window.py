@@ -28,6 +28,8 @@ class MainWindow(
         self.vault_path = vault_path
         self.master_password = master_password
         self.vault_data = vault_data
+        # Référence conservée pour réutiliser la même fenêtre de messagerie.
+        self.messaging_window = None
         self.profile = self.get_profile()
         self.url_stack = []
 
@@ -151,6 +153,15 @@ class MainWindow(
         self.home_button.setChecked(True)
         self.home_button.clicked.connect(self.go_home)
         side.addWidget(self.home_button)
+
+        # Ouvrir la messagerie dans une fenêtre indépendante.
+        self.messaging_button = QPushButton("✉   Messagerie")
+        self.messaging_button.setObjectName("navButton")
+        self.messaging_button.setToolTip(
+            "Ouvrir la messagerie académique dans une nouvelle fenêtre"
+        )
+        self.messaging_button.clicked.connect(self.open_messaging)
+        side.addWidget(self.messaging_button)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -284,6 +295,33 @@ class MainWindow(
             self.status_label.setText(
                 "Aucun compte configuré. Ouvre « Compte et connexion »."
             )
+    def open_messaging(self):
+        """Ouvre la fenêtre de messagerie en conservant Nuage Explorer ouvert."""
+        try:
+            # Import différé : le module sera chargé uniquement à l'ouverture.
+            from .messagerie import MessagerieWindow
+        except ImportError as exc:
+            QMessageBox.information(
+                self,
+                "Messagerie",
+                "Le bouton est en place, mais le module messagerie.py "
+                "n'est pas encore disponible.\n\n"
+                "Il sera relié à la nouvelle fenêtre lors de l'ajout du module.",
+            )
+            return
+
+        if self.messaging_window is None:
+            self.messaging_window = MessagerieWindow(
+                self.vault_path,
+                self.master_password,
+                self.vault_data,
+                self,
+            )
+
+        self.messaging_window.show()
+        self.messaging_window.raise_()
+        self.messaging_window.activateWindow()
+
     def closeEvent(self, event):
         self.storage_widget.shutdown()
         super().closeEvent(event)

@@ -17,6 +17,7 @@ src/
     ├── main_window.py        # construction de la fenêtre principale
     ├── profile_navigation.py # profil, arborescence et navigation
     ├── preview_office.py     # aperçus et fonctions LibreOffice
+    ├── printing.py           # Module impression des pdf
     ├── remote_operations.py  # menu contextuel, couper/copier, renommer/supprimer
     ├── transfers.py          # téléchargements, envois et glisser-déposer
     ├── folder_operations.py  # création de dossiers distants
