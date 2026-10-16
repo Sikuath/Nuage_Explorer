@@ -47,7 +47,7 @@ def _decode_mime(value):
 
 
 def _message_body(message):
-    """Extrait le corps texte d'un courriel, sans afficher son HTML brut."""
+    """Extrait le corps d'un courriel en privilégiant la version texte."""
     plain_parts = []
     html_parts = []
 
@@ -79,10 +79,33 @@ def _message_body(message):
     if plain_parts:
         return "\n\n".join(plain_parts)
     if html_parts:
-        # L'HTML distant est volontairement affiché comme texte pour éviter
-        # le chargement de contenus externes dans le navigateur intégré.
+        # Le rendu HTML est effectué ensuite par QTextBrowser. Les ressources
+        # distantes et les pixels de suivi sont retirés avant affichage.
         return "\n\n".join(html_parts)
     return "(Ce message ne contient pas de corps texte affichable.)"
+
+
+def _prepare_mail_html(source):
+    """Prépare un corps HTML pour QTextBrowser sans charger de contenu distant."""
+    html = source or ""
+    # Ne conserver que le contenu du body, lorsqu'il existe.
+    match = re.search(r"<body\b[^>]*>(.*?)</body\s*>", html, flags=re.I | re.S)
+    if match:
+        html = match.group(1)
+    else:
+        html = re.sub(r"<!DOCTYPE[^>]*>", "", html, flags=re.I | re.S)
+        html = re.sub(r"<head\b[^>]*>.*?</head\s*>", "", html, flags=re.I | re.S)
+        html = re.sub(r"</?html\b[^>]*>", "", html, flags=re.I)
+    # Supprimer scripts, styles externes, images (dont les pixels de suivi)
+    # et les balises de métadonnées. QTextBrowser ne doit pas charger d'images distantes.
+    html = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", html, flags=re.I | re.S)
+    html = re.sub(r"<style\b[^>]*>.*?</style\s*>", "", html, flags=re.I | re.S)
+    html = re.sub(r"<img\b[^>]*>", "", html, flags=re.I | re.S)
+    html = re.sub(r"<meta\b[^>]*>", "", html, flags=re.I | re.S)
+    html = re.sub(r"<link\b[^>]*>", "", html, flags=re.I | re.S)
+    # Retirer les liens de suivi vides laissés par les images supprimées.
+    html = re.sub(r"<a\b[^>]*>\s*</a\s*>", "", html, flags=re.I | re.S)
+    return html.strip()
 
 
 class MailSettingsDialog(QDialog):
@@ -248,7 +271,19 @@ class MailFoldersWorker(QThread):
         client = None
         try:
             client = _connect_imap(self.settings)
-            self.folders_ready.emit(_list_mailboxes(client))
+            folders = _list_mailboxes(client)
+            # Récupère le nombre total de messages de chaque dossier.
+            # Un dossier inaccessible est conservé avec un compteur inconnu.
+            for folder in folders:
+                try:
+                    status, data = client.select(folder["name"], readonly=True)
+                    if status == "OK" and data and data[0]:
+                        folder["count"] = int(data[0])
+                    else:
+                        folder["count"] = None
+                except Exception:
+                    folder["count"] = None
+            self.folders_ready.emit(folders)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
@@ -516,24 +551,40 @@ class MessagerieWindow(QMainWindow):
         header.addWidget(self.compose_button)
         root.addLayout(header)
 
-        self.folder_combo = QComboBox()
-        self.folder_combo.addItem("Boîte de réception", "INBOX")
-        self.folder_combo.currentIndexChanged.connect(self.change_folder)
-        root.addWidget(self.folder_combo)
+        # Présentation à la Thunderbird : dossiers à gauche, liste des
+        # messages au centre et lecture à droite.
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        folder_panel = QWidget()
+        folder_layout = QVBoxLayout(folder_panel)
+        folder_layout.setContentsMargins(0, 0, 8, 0)
+        folder_title = QLabel("DOSSIERS")
+        folder_title.setObjectName("muted")
+        folder_layout.addWidget(folder_title)
+        self.folder_list = QListWidget()
+        self.folder_list.setMinimumWidth(185)
+        self.folder_list.setMaximumWidth(280)
+        self.folder_list.currentItemChanged.connect(self.select_folder)
+        folder_layout.addWidget(self.folder_list, 1)
+        main_splitter.addWidget(folder_panel)
+
+        content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.message_list = QListWidget()
-        self.message_list.setMinimumWidth(280)
+        self.message_list.setMinimumWidth(260)
         self.message_list.currentItemChanged.connect(self.select_message)
-        splitter.addWidget(self.message_list)
+        content_splitter.addWidget(self.message_list)
 
         self.message_view = QTextBrowser()
         self.message_view.setOpenExternalLinks(False)
         self.message_view.setPlaceholderText("Sélectionne un message pour le lire.")
-        splitter.addWidget(self.message_view)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        root.addWidget(splitter, 1)
+        content_splitter.addWidget(self.message_view)
+        content_splitter.setStretchFactor(0, 1)
+        content_splitter.setStretchFactor(1, 2)
+        main_splitter.addWidget(content_splitter)
+        main_splitter.setStretchFactor(0, 0)
+        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([210, 840])
+        root.addWidget(main_splitter, 1)
 
         self.status_label = QLabel("Prêt")
         self.status_label.setObjectName("status")
@@ -543,7 +594,6 @@ class MessagerieWindow(QMainWindow):
             self.configure_account()
         else:
             self.load_folders()
-            self.refresh_messages()
 
     def configure_account(self):
         dialog = MailSettingsDialog(self.settings, self)
@@ -579,7 +629,6 @@ class MessagerieWindow(QMainWindow):
         self.account_label.setText(self.settings["email"])
         self.status_label.setText("Configuration enregistrée dans le vault chiffré.")
         self.load_folders()
-        self.refresh_messages()
 
     def load_folders(self):
         if not self.settings:
@@ -592,22 +641,67 @@ class MessagerieWindow(QMainWindow):
         self.folders_worker.start()
 
     def folders_loaded(self, folders):
+        """Affiche les dossiers à gauche avec leur nombre de messages."""
         previous = self.current_folder
-        self.folder_combo.blockSignals(True)
-        self.folder_combo.clear()
-        for folder in folders:
-            label = folder["label"]
-            if folder["is_sent"] and label == folder["name"]:
-                label = "Messages envoyés"
-            self.folder_combo.addItem(label, folder["name"])
-        index = self.folder_combo.findData(previous)
-        self.folder_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.current_folder = self.folder_combo.currentData() or "INBOX"
-        self.folder_combo.blockSignals(False)
+        self.folder_list.blockSignals(True)
+        self.folder_list.clear()
 
-    def change_folder(self, _index):
-        folder = self.folder_combo.currentData()
-        if not folder:
+        # Inbox d'abord, puis les autres dossiers dans l'ordre du serveur.
+        folders = sorted(
+            folders,
+            key=lambda f: (f["name"].casefold() != "inbox", f["label"].casefold()),
+        )
+        for folder in folders:
+            count = folder.get("count")
+            if count is None:
+                count_text = "(?)"
+            else:
+                count_text = f"({count})"
+            if folder["name"].casefold() == "inbox":
+                icon = "📥"
+                label = "Boîte de réception"
+            elif folder["is_sent"]:
+                icon = "📤"
+                label = "Messages envoyés"
+            elif any(word in folder["name"].casefold() for word in ("draft", "brouillon")):
+                icon = "📝"
+                label = folder["label"]
+            elif any(word in folder["name"].casefold() for word in ("trash", "corbeille", "deleted", "poubelle")):
+                icon = "🗑"
+                label = folder["label"]
+            elif any(word in folder["name"].casefold() for word in ("junk", "spam", "indésirable")):
+                icon = "⚠"
+                label = folder["label"]
+            else:
+                icon = "📁"
+                label = folder["label"]
+
+            item = QListWidgetItem(f"{icon}  {label}  {count_text}")
+            item.setData(Qt.ItemDataRole.UserRole, folder["name"])
+            item.setToolTip(f"{folder['name']} — {count_text} message(s)")
+            self.folder_list.addItem(item)
+
+        index_to_select = 0
+        for i in range(self.folder_list.count()):
+            item = self.folder_list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == previous:
+                index_to_select = i
+                break
+        if self.folder_list.count():
+            self.folder_list.setCurrentRow(index_to_select)
+        self.folder_list.blockSignals(False)
+
+        selected = self.folder_list.currentItem()
+        if selected is not None:
+            self.current_folder = selected.data(Qt.ItemDataRole.UserRole) or "INBOX"
+            self.refresh_messages()
+        self.folders_worker = None
+
+    def select_folder(self, current, previous=None):
+        if current is None:
+            return
+        folder = current.data(Qt.ItemDataRole.UserRole)
+        if not folder or folder == self.current_folder:
             return
         self.current_folder = folder
         self.refresh_messages()
@@ -645,7 +739,12 @@ class MessagerieWindow(QMainWindow):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message["id"])
             self.message_list.addItem(item)
-        folder_label = self.folder_combo.currentText() or self.current_folder
+        folder_label = self.current_folder
+        for i in range(self.folder_list.count()):
+            folder_item = self.folder_list.item(i)
+            if folder_item.data(Qt.ItemDataRole.UserRole) == self.current_folder:
+                folder_label = folder_item.text().split("  ", 2)[1]
+                break
         self.status_label.setText(
             f"{len(messages)} message(s) chargé(s) — {folder_label}."
         )
@@ -653,8 +752,13 @@ class MessagerieWindow(QMainWindow):
             self.message_view.setPlainText(f"Le dossier « {folder_label} » est vide.")
 
     def list_finished(self):
+        finished_folder = self.list_worker.folder if self.list_worker is not None else None
         self.refresh_button.setEnabled(True)
         self.list_worker = None
+        # Si l'utilisateur a changé de dossier pendant le chargement, lance
+        # maintenant le chargement du dossier réellement sélectionné.
+        if finished_folder and finished_folder != self.current_folder:
+            self.refresh_messages()
 
     def select_message(self, current, previous=None):
         if current is None or not self.settings:
@@ -678,8 +782,13 @@ class MessagerieWindow(QMainWindow):
             f"<b>À :</b> {escape(recipient)}<br>"
             f"<b>Date :</b> {escape(date)}</p><hr>"
         )
-        # Le contenu est traité comme texte, pas comme HTML actif.
-        self.message_view.setHtml(header + f"<pre>{escape(body)}</pre>")
+        # Les courriels HTML sont rendus avec leur mise en forme. Les images
+        # distantes/pixels de suivi sont retirés dans _prepare_mail_html.
+        if re.search(r"<\s*(?:html|body|div|p|table|span|h[1-6])\b", body, flags=re.I):
+            rendered_body = _prepare_mail_html(body)
+            self.message_view.setHtml(header + rendered_body)
+        else:
+            self.message_view.setHtml(header + f"<pre>{escape(body)}</pre>")
         self.status_label.setText("Message chargé.")
 
     def message_finished(self):
@@ -699,6 +808,7 @@ class MessagerieWindow(QMainWindow):
                 return
         dialog = SendMailDialog(self.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.load_folders()  # actualise aussi les compteurs des dossiers
             self.refresh_messages()
 
     def return_to_nuage(self):
