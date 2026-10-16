@@ -631,8 +631,9 @@ class MailActionWorker(QThread):
                     pass
 
 
+
 class SendMailDialog(QDialog):
-    """Fenêtre simple de rédaction et d'envoi d'un courriel."""
+    """Fenêtre de rédaction et d'envoi d'un courriel avec À, Cc et Cci."""
 
     def __init__(self, settings, parent=None, draft=None, contacts=None):
         super().__init__(parent)
@@ -640,22 +641,30 @@ class SendMailDialog(QDialog):
         self.draft = dict(draft or {})
         self.contacts = list(contacts or [])
         self.setWindowTitle("Répondre" if self.draft else "Nouveau message")
-        self.resize(650, 500)
+        self.resize(700, 550)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        
+
         self.to_edit = QLineEdit(self.draft.get("to", ""))
+        self.cc_edit = QLineEdit(self.draft.get("cc", ""))
+        self.bcc_edit = QLineEdit(self.draft.get("bcc", ""))
         self.subject_edit = QLineEdit(self.draft.get("subject", ""))
 
-        recipient_row = QHBoxLayout()
-        recipient_row.addWidget(self.to_edit, 1)
+        def recipient_row(edit):
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            button = QPushButton("👥 Contacts…")
+            button.clicked.connect(
+                lambda checked=False, target=edit: self.choose_contacts(target)
+            )
+            row.addWidget(button)
+            return row
 
-        self.contacts_button = QPushButton("👥 Choisir des contacts…")
-        self.contacts_button.clicked.connect(self.choose_contacts)
-        recipient_row.addWidget(self.contacts_button)
-
-        form.addRow("À :", recipient_row)
+        form.addRow("À :", recipient_row(self.to_edit))
+        form.addRow("Cc :", recipient_row(self.cc_edit))
+        form.addRow("Cci :", recipient_row(self.bcc_edit))
+        form.addRow("Objet :", self.subject_edit)
 
         self.contact_completer = QCompleter(
             [
@@ -668,12 +677,9 @@ class SendMailDialog(QDialog):
         self.contact_completer.setCaseSensitivity(
             Qt.CaseSensitivity.CaseInsensitive
         )
-        self.contact_completer.setFilterMode(
-            Qt.MatchFlag.MatchContains
-        )
+        self.contact_completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.to_edit.setCompleter(self.contact_completer)
-        
-        form.addRow("Objet :", self.subject_edit)
+
         layout.addLayout(form)
 
         self.body_edit = QTextEdit()
@@ -681,28 +687,38 @@ class SendMailDialog(QDialog):
         self.body_edit.setPlainText(self.draft.get("body", ""))
         layout.addWidget(self.body_edit, 1)
 
-        # Pièces jointes : les chemins restent locaux et les fichiers sont
-        # incorporés au courriel uniquement au moment de l'envoi.
+        # Pièces jointes : les fichiers sont incorporés au message à l'envoi.
         self.attachments = []
         attachment_header = QHBoxLayout()
         attachment_header.addWidget(QLabel("Pièces jointes"))
         attachment_header.addStretch(1)
+
         self.add_attachment_button = QPushButton("📎 Ajouter…")
         self.add_attachment_button.clicked.connect(self.add_attachments)
+
         self.remove_attachment_button = QPushButton("Retirer")
         self.remove_attachment_button.setEnabled(False)
-        self.remove_attachment_button.clicked.connect(self.remove_selected_attachment)
+        self.remove_attachment_button.clicked.connect(
+            self.remove_selected_attachment
+        )
+
         attachment_header.addWidget(self.add_attachment_button)
         attachment_header.addWidget(self.remove_attachment_button)
         layout.addLayout(attachment_header)
 
         self.attachment_list = QListWidget()
         self.attachment_list.setMaximumHeight(95)
-        self.attachment_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.attachment_list.itemSelectionChanged.connect(
-            lambda: self.remove_attachment_button.setEnabled(bool(self.attachment_list.selectedItems()))
+        self.attachment_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection
         )
-        self.attachment_list.setToolTip("Fichiers qui seront joints au message")
+        self.attachment_list.itemSelectionChanged.connect(
+            lambda: self.remove_attachment_button.setEnabled(
+                bool(self.attachment_list.selectedItems())
+            )
+        )
+        self.attachment_list.setToolTip(
+            "Fichiers qui seront joints au message"
+        )
         layout.addWidget(self.attachment_list)
 
         buttons = QDialogButtonBox()
@@ -715,9 +731,9 @@ class SendMailDialog(QDialog):
         self.send_button.clicked.connect(self.send_message)
         self.cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
-    
-    def choose_contacts(self):
-        """Charge le carnet NUAGE et ajoute les contacts sélectionnés."""
+
+    def choose_contacts(self, target_edit):
+        """Ajoute les contacts sélectionnés au champ destinataire demandé."""
         parent = self.parent()
         profile = getattr(parent, "webdav_profile", None)
 
@@ -733,7 +749,6 @@ class SendMailDialog(QDialog):
             from .contacts import load_contacts, ContactSelectionDialog
 
             contacts = load_contacts(profile)
-
             if not contacts:
                 QMessageBox.information(
                     self,
@@ -743,7 +758,6 @@ class SendMailDialog(QDialog):
                 return
 
             dialog = ContactSelectionDialog(contacts, self)
-
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
 
@@ -751,15 +765,14 @@ class SendMailDialog(QDialog):
             if not selected:
                 return
 
-            current_text = self.to_edit.text().strip()
+            current_text = target_edit.text().strip()
             existing_addresses = {
                 address.casefold()
                 for _, address in getaddresses([current_text])
                 if address
             }
 
-            new_entries = []
-
+            additions = []
             for contact in selected:
                 address = (contact.get("email") or "").strip()
                 if not address or address.casefold() in existing_addresses:
@@ -767,15 +780,12 @@ class SendMailDialog(QDialog):
 
                 name = (contact.get("name") or "").strip()
                 entry = formataddr((name, address)) if name else address
-
-                new_entries.append(entry)
+                additions.append(entry)
                 existing_addresses.add(address.casefold())
 
-            if new_entries:
-                addition = ", ".join(new_entries)
-                if current_text:
-                    current_text += ", "
-                self.to_edit.setText(current_text + addition)
+            if additions:
+                prefix = current_text + ", " if current_text else ""
+                target_edit.setText(prefix + ", ".join(additions))
 
         except Exception as exc:
             QMessageBox.warning(
@@ -790,10 +800,13 @@ class SendMailDialog(QDialog):
             self,
             "Choisir les pièces jointes",
             "",
-            "Tous les fichiers (*);;Documents (*.pdf *.odt *.ods *.doc *.docx *.xls *.xlsx *.txt);;Images (*.png *.jpg *.jpeg *.gif *.webp)",
+            "Tous les fichiers (*);;"
+            "Documents (*.pdf *.odt *.ods *.doc *.docx *.xls *.xlsx *.txt);;"
+            "Images (*.png *.jpg *.jpeg *.gif *.webp)",
         )
         if not paths:
             return
+
         existing = set(self.attachments)
         for path in paths:
             if path not in existing and os.path.isfile(path):
@@ -805,50 +818,101 @@ class SendMailDialog(QDialog):
 
     def remove_selected_attachment(self):
         selected_rows = sorted(
-            (self.attachment_list.row(item) for item in self.attachment_list.selectedItems()),
+            (
+                self.attachment_list.row(item)
+                for item in self.attachment_list.selectedItems()
+            ),
             reverse=True,
         )
         for row in selected_rows:
             self.attachment_list.takeItem(row)
             del self.attachments[row]
+
         self.remove_attachment_button.setEnabled(False)
 
     def send_message(self):
-        recipient = self.to_edit.text().strip()
-        if not recipient or "@" not in recipient:
-            QMessageBox.warning(self, "Destinataire invalide", "Renseigne une adresse de destinataire.")
+        to_text = self.to_edit.text().strip()
+        cc_text = self.cc_edit.text().strip()
+        bcc_text = self.bcc_edit.text().strip()
+
+        to_addresses = [
+            address for _, address in getaddresses([to_text]) if address
+        ]
+        cc_addresses = [
+            address for _, address in getaddresses([cc_text]) if address
+        ]
+        bcc_addresses = [
+            address for _, address in getaddresses([bcc_text]) if address
+        ]
+
+        all_addresses = to_addresses + cc_addresses + bcc_addresses
+
+        if not all_addresses or any(
+            not re.fullmatch(
+                r"[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+",
+                address,
+            )
+            for address in all_addresses
+        ):
+            QMessageBox.warning(
+                self,
+                "Destinataires invalides",
+                "Vérifie les adresses e-mail dans les champs À, Cc et Cci.",
+            )
             return
+
         if not self.settings.get("smtp_host"):
-            QMessageBox.warning(self, "SMTP non configuré", "Configure le serveur SMTP avant l'envoi.")
+            QMessageBox.warning(
+                self,
+                "SMTP non configuré",
+                "Configure le serveur SMTP avant l'envoi.",
+            )
             return
 
         message = EmailMessage()
         message["From"] = self.settings["email"]
-        message["To"] = recipient
+
+        if to_text:
+            message["To"] = to_text
+        if cc_text:
+            message["Cc"] = cc_text
+
+        # Important : aucun en-tête Bcc n'est ajouté au message.
+        # Les destinataires Cci sont transmis séparément au serveur SMTP.
         message["Subject"] = self.subject_edit.text().strip()
+
         if self.draft.get("in_reply_to"):
             message["In-Reply-To"] = self.draft["in_reply_to"]
         if self.draft.get("references"):
             message["References"] = self.draft["references"]
+
         message.set_content(self.body_edit.toPlainText())
 
         try:
             for path in self.attachments:
                 if not os.path.isfile(path):
-                    raise FileNotFoundError(f"La pièce jointe n'existe plus : {path}")
+                    raise FileNotFoundError(
+                        f"La pièce jointe n'existe plus : {path}"
+                    )
+
                 with open(path, "rb") as attachment_file:
                     data = attachment_file.read()
+
                 content_type, _ = mimetypes.guess_type(path)
                 if content_type:
                     maintype, subtype = content_type.split("/", 1)
                 else:
                     maintype, subtype = "application", "octet-stream"
+
                 message.add_attachment(
                     data,
                     maintype=maintype,
                     subtype=subtype,
                     filename=os.path.basename(path),
                 )
+
+            # Évite d'envoyer deux fois une même adresse.
+            recipients = list(dict.fromkeys(all_addresses))
 
             host = self.settings["smtp_host"]
             port = int(self.settings.get("smtp_port", 465))
@@ -864,7 +928,11 @@ class SendMailDialog(QDialog):
                         self.settings["username"],
                         self.settings["password"],
                     )
-                    server.send_message(message)
+                    server.send_message(
+                        message,
+                        from_addr=self.settings["email"],
+                        to_addrs=recipients,
+                    )
             else:
                 with smtplib.SMTP_SSL(
                     host, port, timeout=25, context=context
@@ -873,33 +941,55 @@ class SendMailDialog(QDialog):
                         self.settings["username"],
                         self.settings["password"],
                     )
-                    server.send_message(message)
+                    server.send_message(
+                        message,
+                        from_addr=self.settings["email"],
+                        to_addrs=recipients,
+                    )
+
         except Exception as exc:
             QMessageBox.critical(
-                self, "Envoi impossible",
-                f"Le message n'a pas été envoyé.\n\n{type(exc).__name__}: {exc}"
+                self,
+                "Envoi impossible",
+                "Le message n'a pas été envoyé.\n\n"
+                f"{type(exc).__name__}: {exc}",
             )
             return
 
-        # SMTP a accepté le message : on en ajoute une copie dans le dossier
-        # IMAP des envoyés, comme le ferait un client de messagerie classique.
+        # Archive le message envoyé dans le dossier IMAP habituel.
+        # L'en-tête Cci reste absent de cette copie.
         archive_error = None
         imap_client = None
+
         try:
             imap_client = _connect_imap(self.settings)
             folders = _list_mailboxes(imap_client)
-            sent_folder = next((f["name"] for f in folders if f["is_sent"]), None)
+            sent_folder = next(
+                (folder["name"] for folder in folders if folder["is_sent"]),
+                None,
+            )
+
             if not sent_folder:
-                archive_error = "Aucun dossier IMAP des messages envoyés n'a été détecté."
+                archive_error = (
+                    "Aucun dossier IMAP des messages envoyés "
+                    "n'a été détecté."
+                )
             else:
                 status, _ = imap_client.append(
-                    sent_folder, "\\Seen", imaplib.Time2Internaldate(time.time()),
-                    message.as_bytes()
+                    sent_folder,
+                    "\\Seen",
+                    imaplib.Time2Internaldate(time.time()),
+                    message.as_bytes(),
                 )
                 if status != "OK":
-                    archive_error = f"Le serveur IMAP a refusé l'archivage dans {sent_folder}."
+                    archive_error = (
+                        f"Le serveur IMAP a refusé l'archivage "
+                        f"dans {sent_folder}."
+                    )
+
         except Exception as exc:
             archive_error = f"{type(exc).__name__}: {exc}"
+
         finally:
             if imap_client is not None:
                 try:
@@ -909,14 +999,21 @@ class SendMailDialog(QDialog):
 
         if archive_error:
             QMessageBox.warning(
-                self, "Message envoyé, copie non archivée",
-                "Le courriel a bien été envoyé, mais sa copie n'a pas pu être "
-                f"enregistrée dans les messages envoyés.\n\n{archive_error}"
+                self,
+                "Message envoyé, copie non archivée",
+                "Le courriel a bien été envoyé, mais sa copie n'a pas pu "
+                "être enregistrée dans les messages envoyés.\n\n"
+                f"{archive_error}",
             )
         else:
-            QMessageBox.information(self, "Message envoyé", "Le courriel a été envoyé et une copie a été enregistrée dans les messages envoyés.")
-        super().accept()
+            QMessageBox.information(
+                self,
+                "Message envoyé",
+                "Le courriel a été envoyé et une copie a été enregistrée "
+                "dans les messages envoyés.",
+            )
 
+        super().accept()
 
 class MessagerieWindow(QMainWindow):
     """Fenêtre indépendante de messagerie, reliée au vault de Nuage Explorer."""
