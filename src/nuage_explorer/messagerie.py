@@ -19,11 +19,91 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QTextBrowser,
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QComboBox,
-    QMessageBox, QTextEdit, QSplitter, QMenu,
+    QMessageBox, QTextEdit, QSplitter, QMenu, QFrame,
 )
 
 from .common import save_vault, VaultError
 from .style import STYLE
+
+# Compléments à la feuille de style partagée : la messagerie utilise des
+# QListWidget et un QTextBrowser, absents des écrans principaux de Nuage.
+MAIL_STYLE = """
+/* Panneau des dossiers, dans l'esprit de la barre latérale de Nuage */
+QFrame#sidebar {
+    background-color: #17263d;
+    border: none;
+    border-radius: 10px;
+}
+QFrame#sidebar QLabel {
+    color: #dce6f4;
+}
+QFrame#sidebar QListWidget {
+    color: #dce6f4;
+    background-color: transparent;
+    border: none;
+    outline: none;
+    padding: 4px;
+}
+QFrame#sidebar QListWidget::item {
+    padding: 9px 8px;
+    border-radius: 6px;
+    margin: 1px 0;
+}
+QFrame#sidebar QListWidget::item:hover {
+    color: #ffffff;
+    background-color: #263b59;
+}
+QFrame#sidebar QListWidget::item:selected {
+    color: #ffffff;
+    background-color: #315783;
+}
+
+/* Liste des messages */
+QWidget#central QListWidget {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    alternate-background-color: #223650;
+    border: 1px solid #354b68;
+    border-radius: 9px;
+    outline: none;
+    padding: 4px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+QWidget#central QListWidget::item {
+    padding: 8px;
+    border-radius: 5px;
+    margin: 1px;
+}
+QWidget#central QListWidget::item:hover {
+    background-color: #293f5c;
+    color: #ffffff;
+}
+QWidget#central QListWidget::item:selected {
+    background-color: #315783;
+    color: #ffffff;
+}
+
+/* Lecture du message */
+QWidget#central QTextBrowser {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #354b68;
+    border-radius: 9px;
+    padding: 8px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+/* Séparateurs et navigation entre pages */
+QSplitter::handle {
+    background-color: #30425d;
+}
+QSplitter::handle:horizontal {
+    width: 5px;
+    margin: 2px;
+}
+"""
 
 
 def _decode_mime(value):
@@ -312,14 +392,15 @@ class MailFoldersWorker(QThread):
 
 
 class MailListWorker(QThread):
-    messages_ready = Signal(list)
+    messages_ready = Signal(list, int, int)
     failed = Signal(str)
 
-    def __init__(self, settings, limit=50, folder="INBOX", parent=None):
+    def __init__(self, settings, limit=50, folder="INBOX", page=0, parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
         self.limit = limit
         self.folder = folder
+        self.page = max(0, int(page))
 
     def run(self):
         client = None
@@ -332,9 +413,15 @@ class MailListWorker(QThread):
             if status != "OK":
                 raise RuntimeError("Impossible de récupérer la liste des messages.")
             ids = data[0].split() if data and data[0] else []
-            ids = ids[-self.limit:]
+            total = len(ids)
+            # Page 0 = the 50 most recent messages; higher pages go backward.
+            max_page = max(0, (total - 1) // self.limit)
+            page = min(self.page, max_page)
+            end = total - (page * self.limit)
+            start = max(0, end - self.limit)
+            page_ids = ids[start:end]
             results = []
-            for sequence in reversed(ids):
+            for sequence in reversed(page_ids):
                 status, fetched = client.fetch(sequence, "(BODY.PEEK[HEADER])")
                 if status != "OK" or not fetched or not fetched[0]:
                     continue
@@ -347,7 +434,7 @@ class MailListWorker(QThread):
                     "to": _decode_mime(parsed.get("To", "")),
                     "date": _decode_mime(parsed.get("Date", "")),
                 })
-            self.messages_ready.emit(results)
+            self.messages_ready.emit(results, total, page)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
@@ -455,15 +542,18 @@ class MailReplyDataWorker(QThread):
 
 
 class MailActionWorker(QThread):
-    """Déplace un message dans la corbeille ou le supprime définitivement."""
-    action_done = Signal(str, str)
+    """Déplace un ou plusieurs messages dans la corbeille ou les supprime."""
+    action_done = Signal(str, str, int)
     failed = Signal(str)
 
-    def __init__(self, settings, folder, message_id, operation, trash_folder=None, parent=None):
+    def __init__(self, settings, folder, message_ids, operation, trash_folder=None, parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
         self.folder = folder
-        self.message_id = str(message_id)
+        if isinstance(message_ids, (list, tuple, set)):
+            self.message_ids = [str(value) for value in message_ids]
+        else:
+            self.message_ids = [str(message_ids)]
         self.operation = operation
         self.trash_folder = trash_folder
 
@@ -475,15 +565,19 @@ class MailActionWorker(QThread):
             if status != "OK":
                 raise RuntimeError(f"Impossible d'ouvrir le dossier IMAP : {self.folder}")
 
-            # La liste utilise des numéros de séquence, alors que les opérations
-            # UID sont plus sûres si la boîte reçoit de nouveaux messages entre-temps.
-            status, uid_data = client.fetch(self.message_id.encode("ascii"), "(UID)")
-            if status != "OK" or not uid_data or not uid_data[0]:
-                raise RuntimeError("Impossible d'identifier le message sur le serveur IMAP.")
-            uid_match = re.search(rb"\bUID\s+(\d+)", uid_data[0][0] if isinstance(uid_data[0], tuple) else uid_data[0])
-            if not uid_match:
-                raise RuntimeError("Le serveur IMAP n'a pas fourni l'identifiant unique du message.")
-            uid = uid_match.group(1)
+            # Résoudre tous les UID avant toute suppression/déplacement : les
+            # numéros de séquence peuvent changer après la première opération.
+            uids = []
+            for message_id in self.message_ids:
+                status, uid_data = client.fetch(message_id.encode("ascii"), "(UID)")
+                if status != "OK" or not uid_data or not uid_data[0]:
+                    raise RuntimeError(f"Impossible d'identifier le message {message_id} sur le serveur IMAP.")
+                raw = uid_data[0][0] if isinstance(uid_data[0], tuple) else uid_data[0]
+                uid_match = re.search(rb"\bUID\s+(\d+)", raw)
+                if not uid_match:
+                    raise RuntimeError("Le serveur IMAP n'a pas fourni l'identifiant unique d'un message.")
+                uids.append(uid_match.group(1))
+
             capabilities = {
                 cap.decode("ascii", errors="ignore") if isinstance(cap, bytes) else str(cap)
                 for cap in getattr(client, "capabilities", ())
@@ -493,37 +587,36 @@ class MailActionWorker(QThread):
             if self.operation == "trash":
                 if not self.trash_folder:
                     raise RuntimeError("Aucun dossier Corbeille n'a été détecté dans le compte IMAP.")
-                # MOVE est préférable car il déplace le message en une opération.
-                try:
-                    status, _ = client.uid("MOVE", uid, client._quote(self.trash_folder))
-                except Exception:
-                    status = "NO"
-                if status != "OK":
-                    # Repli pour les serveurs sans extension MOVE. UIDPLUS permet
-                    # d'expurger uniquement ce message, sans toucher aux autres.
-                    if "UIDPLUS" not in capabilities:
-                        raise RuntimeError("Le serveur ne prend pas en charge MOVE ni UIDPLUS ; déplacement annulé pour éviter de supprimer d'autres messages marqués.")
-                    status, _ = client.uid("COPY", uid, client._quote(self.trash_folder))
+                for uid in uids:
+                    # MOVE est préférable car il déplace le message en une opération.
+                    try:
+                        status, _ = client.uid("MOVE", uid, client._quote(self.trash_folder))
+                    except Exception:
+                        status = "NO"
                     if status != "OK":
-                        raise RuntimeError(f"Impossible de déplacer le message vers {self.trash_folder}.")
-                    status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
-                    if status != "OK":
-                        raise RuntimeError("Le message a été copié dans la corbeille mais n'a pas pu être retiré du dossier d'origine.")
-                    status, _ = client.uid("EXPUNGE", uid)
-                    if status != "OK":
-                        raise RuntimeError("Le message a été copié dans la corbeille, mais son retrait du dossier d'origine a échoué.")
-                self.action_done.emit("trash", self.folder)
+                        if "UIDPLUS" not in capabilities:
+                            raise RuntimeError("Le serveur ne prend pas en charge MOVE ni UIDPLUS ; déplacement annulé pour éviter de supprimer d'autres messages marqués.")
+                        status, _ = client.uid("COPY", uid, client._quote(self.trash_folder))
+                        if status != "OK":
+                            raise RuntimeError(f"Impossible de déplacer un message vers {self.trash_folder}.")
+                        status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
+                        if status != "OK":
+                            raise RuntimeError("Un message a été copié dans la corbeille mais n'a pas pu être retiré du dossier d'origine.")
+                        status, _ = client.uid("EXPUNGE", uid)
+                        if status != "OK":
+                            raise RuntimeError("Un message a été copié dans la corbeille, mais son retrait du dossier d'origine a échoué.")
+                self.action_done.emit("trash", self.folder, len(uids))
             elif self.operation == "delete":
                 if "UIDPLUS" not in capabilities:
                     raise RuntimeError("Le serveur ne prend pas en charge UIDPLUS : l'effacement définitif ciblé n'est pas disponible sans risquer de supprimer d'autres messages marqués.")
-                status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
-                if status != "OK":
-                    raise RuntimeError("Le serveur IMAP n'a pas accepté la suppression du message.")
-                if "UIDPLUS" in capabilities:
+                for uid in uids:
+                    status, _ = client.uid("STORE", uid, "+FLAGS", trash_flags)
+                    if status != "OK":
+                        raise RuntimeError("Le serveur IMAP n'a pas accepté la suppression d'un des messages.")
                     status, _ = client.uid("EXPUNGE", uid)
                     if status != "OK":
-                        raise RuntimeError("Le serveur a marqué le message comme supprimé, mais n'a pas confirmé son effacement définitif.")
-                self.action_done.emit("delete", self.folder)
+                        raise RuntimeError("Le serveur a marqué un message comme supprimé, mais n'a pas confirmé son effacement définitif.")
+                self.action_done.emit("delete", self.folder, len(uids))
             else:
                 raise RuntimeError("Opération de messagerie inconnue.")
         except Exception as exc:
@@ -674,9 +767,12 @@ class MessagerieWindow(QMainWindow):
         self.action_worker = None
         self.current_folder = "INBOX"
         self.mail_folders = []
+        self.page_size = 50
+        self.current_page = 0
+        self.total_messages = 0
 
         self.setWindowTitle("Messagerie académique — Nuage Explorer")
-        self.setStyleSheet(STYLE)
+        self.setStyleSheet(STYLE + "\n" + MAIL_STYLE)
         self.resize(1050, 700)
         self.setMinimumSize(760, 480)
 
@@ -722,7 +818,8 @@ class MessagerieWindow(QMainWindow):
         # messages au centre et lecture à droite.
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        folder_panel = QWidget()
+        folder_panel = QFrame()
+        folder_panel.setObjectName("sidebar")
         folder_layout = QVBoxLayout(folder_panel)
         folder_layout.setContentsMargins(0, 0, 8, 0)
         folder_title = QLabel("DOSSIERS")
@@ -737,6 +834,7 @@ class MessagerieWindow(QMainWindow):
 
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.message_list = QListWidget()
+        self.message_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.message_list.setMinimumWidth(260)
         self.message_list.currentItemChanged.connect(self.select_message)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -754,6 +852,21 @@ class MessagerieWindow(QMainWindow):
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setSizes([210, 840])
         root.addWidget(main_splitter, 1)
+
+        # Navigation entre pages de 50 messages.
+        pagination = QHBoxLayout()
+        self.previous_page_button = QPushButton("← 50 précédents")
+        self.previous_page_button.setEnabled(False)
+        self.previous_page_button.clicked.connect(self.show_previous_page)
+        pagination.addWidget(self.previous_page_button)
+        self.page_label = QLabel("Page 1")
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pagination.addWidget(self.page_label, 1)
+        self.next_page_button = QPushButton("50 suivants →")
+        self.next_page_button.setEnabled(False)
+        self.next_page_button.clicked.connect(self.show_next_page)
+        pagination.addWidget(self.next_page_button)
+        root.addLayout(pagination)
 
         self.status_label = QLabel("Prêt")
         self.status_label.setObjectName("status")
@@ -874,7 +987,19 @@ class MessagerieWindow(QMainWindow):
         if not folder or folder == self.current_folder:
             return
         self.current_folder = folder
+        self.current_page = 0
         self.refresh_messages()
+
+    def show_previous_page(self):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.refresh_messages()
+
+    def show_next_page(self):
+        max_page = max(0, (self.total_messages - 1) // self.page_size)
+        if self.current_page < max_page:
+            self.current_page += 1
+            self.refresh_messages()
 
     def refresh_messages(self):
         if not self.settings:
@@ -890,15 +1015,20 @@ class MessagerieWindow(QMainWindow):
         self.message_view.clear()
         self.status_label.setText("Connexion au serveur IMAP…")
         self.refresh_button.setEnabled(False)
+        self.previous_page_button.setEnabled(False)
+        self.next_page_button.setEnabled(False)
         self.list_worker = MailListWorker(
-            self.settings, folder=self.current_folder, parent=self
+            self.settings, limit=self.page_size, folder=self.current_folder,
+            page=self.current_page, parent=self
         )
         self.list_worker.messages_ready.connect(self.messages_loaded)
         self.list_worker.failed.connect(self.mail_error)
         self.list_worker.finished.connect(self.list_finished)
         self.list_worker.start()
 
-    def messages_loaded(self, messages):
+    def messages_loaded(self, messages, total, page):
+        self.total_messages = total
+        self.current_page = page
         self.message_list.clear()
         for message in messages:
             label = (
@@ -915,6 +1045,16 @@ class MessagerieWindow(QMainWindow):
             if folder_item.data(Qt.ItemDataRole.UserRole) == self.current_folder:
                 folder_label = folder_item.text().split("  ", 2)[1]
                 break
+        if total:
+            first_number = page * self.page_size + 1
+            last_number = min((page + 1) * self.page_size, total)
+            self.page_label.setText(
+                f"Messages {first_number}–{last_number} sur {total}  ·  Page {page + 1}"
+            )
+        else:
+            self.page_label.setText("Aucun message")
+        self.previous_page_button.setEnabled(page > 0)
+        self.next_page_button.setEnabled((page + 1) * self.page_size < total)
         self.status_label.setText(
             f"{len(messages)} message(s) chargé(s) — {folder_label}."
         )
@@ -931,27 +1071,44 @@ class MessagerieWindow(QMainWindow):
             self.refresh_messages()
 
     def show_message_context_menu(self, position):
-        """Menu contextuel façon Thunderbird pour le message sélectionné."""
+        """Menu contextuel : répond ou agit sur un ou plusieurs messages sélectionnés."""
         item = self.message_list.itemAt(position)
         if item is None:
             return
-        self.message_list.setCurrentItem(item)
+        # Un clic droit sur un élément déjà sélectionné conserve toute la sélection.
+        # Sinon, il sélectionne uniquement l'élément visé.
+        if not item.isSelected():
+            self.message_list.clearSelection()
+            item.setSelected(True)
+            self.message_list.setCurrentItem(item)
+        selected_items = self.message_list.selectedItems()
+        message_ids = [entry.data(Qt.ItemDataRole.UserRole) for entry in selected_items]
+        if not message_ids:
+            return
+
         menu = QMenu(self)
-        reply_action = menu.addAction("↩ Répondre à l'expéditeur")
-        reply_all_action = menu.addAction("↩ Répondre à tous")
-        menu.addSeparator()
-        trash_action = menu.addAction("🗑 Déplacer vers la corbeille")
-        delete_action = menu.addAction("✖ Supprimer définitivement")
+        reply_action = reply_all_action = None
+        if len(message_ids) == 1:
+            reply_action = menu.addAction("↩ Répondre à l'expéditeur")
+            reply_all_action = menu.addAction("↩ Répondre à tous")
+            menu.addSeparator()
+        trash_action = menu.addAction(
+            f"🗑 Déplacer {len(message_ids)} message(s) vers la corbeille"
+            if len(message_ids) > 1 else "🗑 Déplacer vers la corbeille"
+        )
+        delete_action = menu.addAction(
+            f"✖ Supprimer définitivement {len(message_ids)} message(s)"
+            if len(message_ids) > 1 else "✖ Supprimer définitivement"
+        )
         chosen = menu.exec(self.message_list.mapToGlobal(position))
-        message_id = item.data(Qt.ItemDataRole.UserRole)
         if chosen == reply_action:
-            self.prepare_reply(message_id, reply_all=False)
+            self.prepare_reply(message_ids[0], reply_all=False)
         elif chosen == reply_all_action:
-            self.prepare_reply(message_id, reply_all=True)
+            self.prepare_reply(message_ids[0], reply_all=True)
         elif chosen == trash_action:
-            self.confirm_message_action(message_id, "trash")
+            self.confirm_message_action(message_ids, "trash")
         elif chosen == delete_action:
-            self.confirm_message_action(message_id, "delete")
+            self.confirm_message_action(message_ids, "delete")
 
     def prepare_reply(self, message_id, reply_all=False):
         if self.reply_worker is not None and self.reply_worker.isRunning():
@@ -975,19 +1132,32 @@ class MessagerieWindow(QMainWindow):
     def reply_finished(self):
         self.reply_worker = None
 
-    def confirm_message_action(self, message_id, operation):
+    def confirm_message_action(self, message_ids, operation):
         if self.action_worker is not None and self.action_worker.isRunning():
             return
+        if not isinstance(message_ids, (list, tuple, set)):
+            message_ids = [message_ids]
+        message_ids = list(message_ids)
+        count = len(message_ids)
+        if not count:
+            return
+        plural = "s" if count > 1 else ""
         if operation == "trash":
             title = "Mettre à la corbeille"
-            prompt = "Déplacer ce message vers la corbeille ?"
+            prompt = (
+                f"Déplacer ces {count} messages vers la corbeille ?"
+                if count > 1 else "Déplacer ce message vers la corbeille ?"
+            )
             trash_folder = next((
                 f["name"] for f in self.mail_folders
                 if f.get("is_trash") or any(word in f["name"].casefold() for word in ("trash", "corbeille", "poubelle", "deleted"))
             ), None)
         else:
             title = "Suppression définitive"
-            prompt = "Supprimer définitivement ce message ? Cette action est irréversible."
+            prompt = (
+                f"Supprimer définitivement ces {count} messages ? Cette action est irréversible."
+                if count > 1 else "Supprimer définitivement ce message ? Cette action est irréversible."
+            )
             trash_folder = None
         answer = QMessageBox.question(
             self, title, prompt,
@@ -996,10 +1166,10 @@ class MessagerieWindow(QMainWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.status_label.setText("Opération sur le message…")
+        self.status_label.setText(f"Opération sur {count} message(s)…")
         self.refresh_button.setEnabled(False)
         self.action_worker = MailActionWorker(
-            self.settings, self.current_folder, message_id, operation,
+            self.settings, self.current_folder, message_ids, operation,
             trash_folder=trash_folder, parent=self
         )
         self.action_worker.action_done.connect(self.message_action_done)
@@ -1007,11 +1177,15 @@ class MessagerieWindow(QMainWindow):
         self.action_worker.finished.connect(self.action_finished)
         self.action_worker.start()
 
-    def message_action_done(self, operation, folder):
+    def message_action_done(self, operation, folder, count):
+        self.current_page = min(
+            self.current_page,
+            max(0, (max(0, self.total_messages - count) - 1) // self.page_size),
+        )
         if operation == "trash":
-            self.status_label.setText("Message déplacé vers la corbeille.")
+            self.status_label.setText(f"{count} message(s) déplacé(s) vers la corbeille.")
         else:
-            self.status_label.setText("Message supprimé définitivement.")
+            self.status_label.setText(f"{count} message(s) supprimé(s) définitivement.")
         self.message_view.clear()
         self.load_folders()
         self.refresh_messages()
