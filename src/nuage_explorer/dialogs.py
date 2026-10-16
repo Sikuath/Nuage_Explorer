@@ -1,6 +1,8 @@
 """Boîtes de dialogue de l’application."""
 from .common import *
 from .style import STYLE
+from .printing import print_pdf
+from PySide6.QtWidgets import QHBoxLayout
 
 class ProfileDialog(QDialog):
     def __init__(self, profile=None, parent=None):
@@ -214,9 +216,24 @@ class PreviewDialog(QDialog):
                 f"Aucun aperçu disponible pour {suffix}."
             )
 
+        
+        # Boutons d'action de l'aperçu
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        if suffix == ".pdf":
+            print_button = QPushButton("Imprimer")
+            print_button.setObjectName("primary")
+            print_button.clicked.connect(
+                lambda: print_pdf(self.preview_path, self)
+            )
+            button_layout.addWidget(print_button)
+
         close_button = QPushButton("Fermer")
         close_button.clicked.connect(self.accept)
-        layout.addWidget(close_button)
+        button_layout.addWidget(close_button)
+
+        layout.addLayout(button_layout)
 
     def update_image_preview(self):
         if self.original_pixmap is None:
