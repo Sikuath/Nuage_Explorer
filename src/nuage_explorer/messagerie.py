@@ -4,6 +4,8 @@ Les paramètres et le mot de passe de messagerie sont enregistrés dans le vault
 déjà déverrouillé par Nuage Explorer. Aucun second mot de passe maître n'est demandé.
 """
 import email
+import mimetypes
+import os
 from email.utils import getaddresses, parseaddr
 import imaplib
 import re
@@ -16,10 +18,10 @@ from html import escape
 
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QMainWindow, QWidget, QCompleter, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QTextBrowser,
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QComboBox,
-    QMessageBox, QTextEdit, QSplitter, QMenu, QFrame,
+    QMessageBox, QTextEdit, QSplitter, QMenu, QFrame, QFileDialog,
 )
 
 from .common import save_vault, VaultError
@@ -632,16 +634,32 @@ class MailActionWorker(QThread):
 class SendMailDialog(QDialog):
     """Fenêtre simple de rédaction et d'envoi d'un courriel."""
 
-    def __init__(self, settings, parent=None, draft=None):
+    def __init__(self, settings, parent=None, draft=None, contacts=None):
         super().__init__(parent)
         self.settings = dict(settings)
         self.draft = dict(draft or {})
+        self.contacts = list(contacts or [])
         self.setWindowTitle("Répondre" if self.draft else "Nouveau message")
         self.resize(650, 500)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.to_edit = QLineEdit(self.draft.get("to", ""))
+        self.contact_completer = QCompleter(
+            [
+                f"{c.get('name', '')} <{c.get('email', '')}>"
+                for c in self.contacts
+                if c.get("email")
+            ],
+            self,
+        )
+        self.contact_completer.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive
+        )
+        self.contact_completer.setFilterMode(
+            Qt.MatchFlag.MatchContains
+        )
+        self.to_edit.setCompleter(self.contact_completer)
         self.subject_edit = QLineEdit(self.draft.get("subject", ""))
         form.addRow("À :", self.to_edit)
         form.addRow("Objet :", self.subject_edit)
@@ -651,6 +669,30 @@ class SendMailDialog(QDialog):
         self.body_edit.setPlaceholderText("Écris ton message…")
         self.body_edit.setPlainText(self.draft.get("body", ""))
         layout.addWidget(self.body_edit, 1)
+
+        # Pièces jointes : les chemins restent locaux et les fichiers sont
+        # incorporés au courriel uniquement au moment de l'envoi.
+        self.attachments = []
+        attachment_header = QHBoxLayout()
+        attachment_header.addWidget(QLabel("Pièces jointes"))
+        attachment_header.addStretch(1)
+        self.add_attachment_button = QPushButton("📎 Ajouter…")
+        self.add_attachment_button.clicked.connect(self.add_attachments)
+        self.remove_attachment_button = QPushButton("Retirer")
+        self.remove_attachment_button.setEnabled(False)
+        self.remove_attachment_button.clicked.connect(self.remove_selected_attachment)
+        attachment_header.addWidget(self.add_attachment_button)
+        attachment_header.addWidget(self.remove_attachment_button)
+        layout.addLayout(attachment_header)
+
+        self.attachment_list = QListWidget()
+        self.attachment_list.setMaximumHeight(95)
+        self.attachment_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.attachment_list.itemSelectionChanged.connect(
+            lambda: self.remove_attachment_button.setEnabled(bool(self.attachment_list.selectedItems()))
+        )
+        self.attachment_list.setToolTip("Fichiers qui seront joints au message")
+        layout.addWidget(self.attachment_list)
 
         buttons = QDialogButtonBox()
         self.send_button = buttons.addButton(
@@ -662,6 +704,34 @@ class SendMailDialog(QDialog):
         self.send_button.clicked.connect(self.send_message)
         self.cancel_button.clicked.connect(self.reject)
         layout.addWidget(buttons)
+
+    def add_attachments(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Choisir les pièces jointes",
+            "",
+            "Tous les fichiers (*);;Documents (*.pdf *.odt *.ods *.doc *.docx *.xls *.xlsx *.txt);;Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        )
+        if not paths:
+            return
+        existing = set(self.attachments)
+        for path in paths:
+            if path not in existing and os.path.isfile(path):
+                self.attachments.append(path)
+                item = QListWidgetItem(os.path.basename(path))
+                item.setToolTip(path)
+                self.attachment_list.addItem(item)
+                existing.add(path)
+
+    def remove_selected_attachment(self):
+        selected_rows = sorted(
+            (self.attachment_list.row(item) for item in self.attachment_list.selectedItems()),
+            reverse=True,
+        )
+        for row in selected_rows:
+            self.attachment_list.takeItem(row)
+            del self.attachments[row]
+        self.remove_attachment_button.setEnabled(False)
 
     def send_message(self):
         recipient = self.to_edit.text().strip()
@@ -683,6 +753,23 @@ class SendMailDialog(QDialog):
         message.set_content(self.body_edit.toPlainText())
 
         try:
+            for path in self.attachments:
+                if not os.path.isfile(path):
+                    raise FileNotFoundError(f"La pièce jointe n'existe plus : {path}")
+                with open(path, "rb") as attachment_file:
+                    data = attachment_file.read()
+                content_type, _ = mimetypes.guess_type(path)
+                if content_type:
+                    maintype, subtype = content_type.split("/", 1)
+                else:
+                    maintype, subtype = "application", "octet-stream"
+                message.add_attachment(
+                    data,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=os.path.basename(path),
+                )
+
             host = self.settings["smtp_host"]
             port = int(self.settings.get("smtp_port", 465))
             security = self.settings.get("smtp_security", "ssl")
@@ -754,11 +841,47 @@ class SendMailDialog(QDialog):
 class MessagerieWindow(QMainWindow):
     """Fenêtre indépendante de messagerie, reliée au vault de Nuage Explorer."""
 
-    def __init__(self, vault_path, master_password, vault_data, parent=None):
+    def get_contacts(self):
+        """Charge le carnet partagé ; une erreur est signalée sans bloquer IMAP."""
+        from .contacts import load_contacts
+
+        if not self.webdav_profile:
+            return []
+
+        try:
+            return load_contacts(self.webdav_profile)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Carnet d'adresses indisponible",
+                "La messagerie reste utilisable, mais les suggestions de "
+                "contacts ne sont pas disponibles.\n\n"
+                f"{type(exc).__name__}: {exc}",
+            )
+            return []
+    def open_contacts(self):
+        """Ouvre le carnet d'adresses partagé sur NUAGE."""
+        if not self.webdav_profile:
+            QMessageBox.warning(
+                self,
+                "NUAGE indisponible",
+                "Aucun profil NUAGE actif n'a été transmis à la messagerie.",
+            )
+            return
+
+        from .contacts import ContactBookDialog
+
+        dialog = ContactBookDialog(self.webdav_profile, self)
+        dialog.exec()
+    def __init__(
+        self, vault_path, master_password, vault_data,
+        parent=None, profile=None
+    ):
         super().__init__(parent)
         self.vault_path = vault_path
         self.master_password = master_password
         self.vault_data = vault_data
+        self.webdav_profile = dict(profile or {})
         self.settings = dict(vault_data.get("mail_account", {}))
         self.list_worker = None
         self.message_worker = None
@@ -808,6 +931,9 @@ class MessagerieWindow(QMainWindow):
         self.refresh_button.clicked.connect(self.refresh_messages)
         header.addWidget(self.refresh_button)
 
+        self.contacts_button = QPushButton("👥 Contacts")
+        self.contacts_button.clicked.connect(self.open_contacts)
+        header.addWidget(self.contacts_button)
         self.compose_button = QPushButton("✉ Nouveau message")
         self.compose_button.setObjectName("primary")
         self.compose_button.clicked.connect(self.compose_message)
@@ -1124,7 +1250,12 @@ class MessagerieWindow(QMainWindow):
         self.reply_worker.start()
 
     def open_reply_dialog(self, draft):
-        dialog = SendMailDialog(self.settings, self, draft=draft)
+        dialog = SendMailDialog(
+            self.settings,
+            self,
+            draft=draft,
+            contacts=self.get_contacts(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.load_folders()
             self.refresh_messages()
@@ -1240,7 +1371,11 @@ class MessagerieWindow(QMainWindow):
             self.configure_account()
             if not self.settings:
                 return
-        dialog = SendMailDialog(self.settings, self)
+        dialog = SendMailDialog(
+            self.settings,
+            self,
+            contacts=self.get_contacts(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.load_folders()  # actualise aussi les compteurs des dossiers
             self.refresh_messages()

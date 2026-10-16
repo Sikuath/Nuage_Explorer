@@ -316,6 +316,7 @@ class MainWindow(
                 self.master_password,
                 self.vault_data,
                 self,
+                profile=self.profile,
             )
 
         self.messaging_window.show()
