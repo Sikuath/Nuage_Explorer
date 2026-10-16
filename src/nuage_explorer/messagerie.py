@@ -5,11 +5,12 @@ déjà déverrouillé par Nuage Explorer. Aucun second mot de passe maître n'es
 """
 import email
 import imaplib
+import re
 import smtplib
 import ssl
+import time
 from email.header import decode_header
 from email.message import EmailMessage
-from email.utils import parseaddr
 from html import escape
 
 from PySide6.QtCore import QThread, Signal, Qt
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QTextBrowser,
     QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QComboBox,
-    QMessageBox, QTextEdit, QSplitter, QProgressBar,
+    QMessageBox, QTextEdit, QSplitter,
 )
 
 from .common import save_vault, VaultError
@@ -173,41 +174,114 @@ class MailSettingsDialog(QDialog):
         super().accept()
 
 
-class MailListWorker(QThread):
-    messages_ready = Signal(list)
+def _mailbox_name(raw_name):
+    """Décode un nom de dossier renvoyé par IMAP (UTF-7 modifié)."""
+    raw_name = raw_name.strip()
+    if raw_name.startswith(b'"') and raw_name.endswith(b'"'):
+        raw_name = raw_name[1:-1].replace(b'\\"', b'"').replace(b'\\\\', b'\\')
+    try:
+        return imaplib.IMAP4._decode_utf7(raw_name.decode("ascii"))
+    except (AttributeError, UnicodeDecodeError, UnicodeEncodeError):
+        return raw_name.decode("utf-8", errors="replace") if isinstance(raw_name, bytes) else raw_name
+
+
+def _list_mailboxes(client):
+    """Renvoie les dossiers IMAP et identifie celui des messages envoyés."""
+    status, rows = client.list()
+    if status != "OK":
+        raise RuntimeError("Impossible de récupérer la liste des dossiers IMAP.")
+
+    folders = []
+    for row in rows or []:
+        if not row:
+            continue
+        if isinstance(row, bytes):
+            line = row.decode("ascii", errors="replace")
+        else:
+            line = str(row)
+        match = re.match(r'^\((.*?)\)\s+(?:"[^"]*"|NIL)\s+(.+)$', line)
+        if not match:
+            continue
+        flags = match.group(1).lower()
+        name = _mailbox_name(match.group(2).encode("ascii", errors="replace"))
+        if not name:
+            continue
+        lowered = name.casefold()
+        is_inbox = lowered == "inbox"
+        is_sent = ("\\sent" in flags or any(token in lowered for token in (
+            "sent", "envoy", "outbox", "gesendet", "inviat", "inviati", "éléments envoyés"
+        )))
+        label = "Boîte de réception" if is_inbox else ("Messages envoyés" if is_sent else name)
+        folders.append({"name": name, "label": label, "is_sent": is_sent})
+
+    if not any(folder["name"].casefold() == "inbox" for folder in folders):
+        folders.insert(0, {"name": "INBOX", "label": "Boîte de réception", "is_sent": False})
+    # Évite les doublons et garde en priorité le dossier signalé par le serveur.
+    unique = {}
+    for folder in folders:
+        key = folder["name"].casefold()
+        if key not in unique or folder["is_sent"]:
+            unique[key] = folder
+    return list(unique.values())
+
+
+def _connect_imap(settings):
+    client = imaplib.IMAP4_SSL(
+        settings["imap_host"],
+        int(settings.get("imap_port", 993)),
+        ssl_context=ssl.create_default_context(),
+        timeout=25,
+    )
+    client.login(settings["username"], settings["password"])
+    return client
+
+
+class MailFoldersWorker(QThread):
+    folders_ready = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, settings, limit=50, parent=None):
+    def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
-        self.limit = limit
 
     def run(self):
         client = None
         try:
-            context = ssl.create_default_context()
-            client = imaplib.IMAP4_SSL(
-                self.settings["imap_host"],
-                int(self.settings.get("imap_port", 993)),
-                ssl_context=context,
-                timeout=25,
-            )
-            client.login(
-                self.settings["username"],
-                self.settings["password"],
-            )
-            status, _ = client.select("INBOX", readonly=True)
-            if status != "OK":
-                raise RuntimeError("Impossible d'ouvrir le dossier de réception.")
+            client = _connect_imap(self.settings)
+            self.folders_ready.emit(_list_mailboxes(client))
+        except Exception as exc:
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
 
+
+class MailListWorker(QThread):
+    messages_ready = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, settings, limit=50, folder="INBOX", parent=None):
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.limit = limit
+        self.folder = folder
+
+    def run(self):
+        client = None
+        try:
+            client = _connect_imap(self.settings)
+            status, _ = client.select(self.folder, readonly=True)
+            if status != "OK":
+                raise RuntimeError(f"Impossible d'ouvrir le dossier IMAP : {self.folder}")
             status, data = client.search(None, "ALL")
             if status != "OK":
                 raise RuntimeError("Impossible de récupérer la liste des messages.")
-
             ids = data[0].split() if data and data[0] else []
             ids = ids[-self.limit:]
             results = []
-
             for sequence in reversed(ids):
                 status, fetched = client.fetch(sequence, "(BODY.PEEK[HEADER])")
                 if status != "OK" or not fetched or not fetched[0]:
@@ -218,14 +292,12 @@ class MailListWorker(QThread):
                     "id": sequence.decode("ascii", errors="ignore"),
                     "subject": _decode_mime(parsed.get("Subject", "")) or "(Sans objet)",
                     "sender": _decode_mime(parsed.get("From", "")),
+                    "to": _decode_mime(parsed.get("To", "")),
                     "date": _decode_mime(parsed.get("Date", "")),
                 })
-
             self.messages_ready.emit(results)
         except Exception as exc:
-            self.failed.emit(
-                f"{type(exc).__name__}: {exc}"
-            )
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             if client is not None:
                 try:
@@ -235,39 +307,32 @@ class MailListWorker(QThread):
 
 
 class MailMessageWorker(QThread):
-    message_ready = Signal(str, str, str, str)
+    message_ready = Signal(str, str, str, str, str)
     failed = Signal(str)
 
-    def __init__(self, settings, message_id, parent=None):
+    def __init__(self, settings, message_id, folder="INBOX", parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
-        self.message_id = message_id
+        self.message_id = str(message_id)
+        self.folder = folder
 
     def run(self):
         client = None
         try:
-            client = imaplib.IMAP4_SSL(
-                self.settings["imap_host"],
-                int(self.settings.get("imap_port", 993)),
-                ssl_context=ssl.create_default_context(),
-                timeout=25,
-            )
-            client.login(self.settings["username"], self.settings["password"])
-            status, _ = client.select("INBOX", readonly=True)
+            client = _connect_imap(self.settings)
+            status, _ = client.select(self.folder, readonly=True)
             if status != "OK":
-                raise RuntimeError("Impossible d'ouvrir le dossier de réception.")
-            status, data = client.fetch(
-                self.message_id.encode("ascii"),
-                "(BODY.PEEK[])",
-            )
+                raise RuntimeError(f"Impossible d'ouvrir le dossier IMAP : {self.folder}")
+            status, data = client.fetch(self.message_id.encode("ascii"), "(BODY.PEEK[])")
             if status != "OK" or not data or not data[0]:
                 raise RuntimeError("Le message n'a pas pu être téléchargé.")
             parsed = email.message_from_bytes(data[0][1])
             subject = _decode_mime(parsed.get("Subject", "")) or "(Sans objet)"
             sender = _decode_mime(parsed.get("From", ""))
+            recipient = _decode_mime(parsed.get("To", ""))
             date = _decode_mime(parsed.get("Date", ""))
             body = _message_body(parsed)
-            self.message_ready.emit(subject, sender, date, body)
+            self.message_ready.emit(subject, sender, recipient, date, body)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
@@ -357,7 +422,40 @@ class SendMailDialog(QDialog):
             )
             return
 
-        QMessageBox.information(self, "Message envoyé", "Le courriel a été envoyé.")
+        # SMTP a accepté le message : on en ajoute une copie dans le dossier
+        # IMAP des envoyés, comme le ferait un client de messagerie classique.
+        archive_error = None
+        imap_client = None
+        try:
+            imap_client = _connect_imap(self.settings)
+            folders = _list_mailboxes(imap_client)
+            sent_folder = next((f["name"] for f in folders if f["is_sent"]), None)
+            if not sent_folder:
+                archive_error = "Aucun dossier IMAP des messages envoyés n'a été détecté."
+            else:
+                status, _ = imap_client.append(
+                    sent_folder, "\\Seen", imaplib.Time2Internaldate(time.time()),
+                    message.as_bytes()
+                )
+                if status != "OK":
+                    archive_error = f"Le serveur IMAP a refusé l'archivage dans {sent_folder}."
+        except Exception as exc:
+            archive_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            if imap_client is not None:
+                try:
+                    imap_client.logout()
+                except Exception:
+                    pass
+
+        if archive_error:
+            QMessageBox.warning(
+                self, "Message envoyé, copie non archivée",
+                "Le courriel a bien été envoyé, mais sa copie n'a pas pu être "
+                f"enregistrée dans les messages envoyés.\n\n{archive_error}"
+            )
+        else:
+            QMessageBox.information(self, "Message envoyé", "Le courriel a été envoyé et une copie a été enregistrée dans les messages envoyés.")
         super().accept()
 
 
@@ -372,6 +470,8 @@ class MessagerieWindow(QMainWindow):
         self.settings = dict(vault_data.get("mail_account", {}))
         self.list_worker = None
         self.message_worker = None
+        self.folders_worker = None
+        self.current_folder = "INBOX"
 
         self.setWindowTitle("Messagerie académique — Nuage Explorer")
         self.setStyleSheet(STYLE)
@@ -416,6 +516,11 @@ class MessagerieWindow(QMainWindow):
         header.addWidget(self.compose_button)
         root.addLayout(header)
 
+        self.folder_combo = QComboBox()
+        self.folder_combo.addItem("Boîte de réception", "INBOX")
+        self.folder_combo.currentIndexChanged.connect(self.change_folder)
+        root.addWidget(self.folder_combo)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.message_list = QListWidget()
         self.message_list.setMinimumWidth(280)
@@ -436,7 +541,8 @@ class MessagerieWindow(QMainWindow):
 
         if not self.settings:
             self.configure_account()
-        elif self.settings:
+        else:
+            self.load_folders()
             self.refresh_messages()
 
     def configure_account(self):
@@ -472,6 +578,38 @@ class MessagerieWindow(QMainWindow):
         self.settings = new_settings
         self.account_label.setText(self.settings["email"])
         self.status_label.setText("Configuration enregistrée dans le vault chiffré.")
+        self.load_folders()
+        self.refresh_messages()
+
+    def load_folders(self):
+        if not self.settings:
+            return
+        if self.folders_worker is not None and self.folders_worker.isRunning():
+            return
+        self.folders_worker = MailFoldersWorker(self.settings, parent=self)
+        self.folders_worker.folders_ready.connect(self.folders_loaded)
+        self.folders_worker.failed.connect(self.mail_error)
+        self.folders_worker.start()
+
+    def folders_loaded(self, folders):
+        previous = self.current_folder
+        self.folder_combo.blockSignals(True)
+        self.folder_combo.clear()
+        for folder in folders:
+            label = folder["label"]
+            if folder["is_sent"] and label == folder["name"]:
+                label = "Messages envoyés"
+            self.folder_combo.addItem(label, folder["name"])
+        index = self.folder_combo.findData(previous)
+        self.folder_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.current_folder = self.folder_combo.currentData() or "INBOX"
+        self.folder_combo.blockSignals(False)
+
+    def change_folder(self, _index):
+        folder = self.folder_combo.currentData()
+        if not folder:
+            return
+        self.current_folder = folder
         self.refresh_messages()
 
     def refresh_messages(self):
@@ -488,7 +626,9 @@ class MessagerieWindow(QMainWindow):
         self.message_view.clear()
         self.status_label.setText("Connexion au serveur IMAP…")
         self.refresh_button.setEnabled(False)
-        self.list_worker = MailListWorker(self.settings, parent=self)
+        self.list_worker = MailListWorker(
+            self.settings, folder=self.current_folder, parent=self
+        )
         self.list_worker.messages_ready.connect(self.messages_loaded)
         self.list_worker.failed.connect(self.mail_error)
         self.list_worker.finished.connect(self.list_finished)
@@ -505,11 +645,12 @@ class MessagerieWindow(QMainWindow):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, message["id"])
             self.message_list.addItem(item)
+        folder_label = self.folder_combo.currentText() or self.current_folder
         self.status_label.setText(
-            f"{len(messages)} message(s) chargé(s) depuis la boîte de réception."
+            f"{len(messages)} message(s) chargé(s) — {folder_label}."
         )
         if not messages:
-            self.message_view.setPlainText("La boîte de réception est vide.")
+            self.message_view.setPlainText(f"Le dossier « {folder_label} » est vide.")
 
     def list_finished(self):
         self.refresh_button.setEnabled(True)
@@ -523,17 +664,18 @@ class MessagerieWindow(QMainWindow):
         message_id = current.data(Qt.ItemDataRole.UserRole)
         self.status_label.setText("Chargement du message…")
         self.message_worker = MailMessageWorker(
-            self.settings, message_id, parent=self
+            self.settings, message_id, folder=self.current_folder, parent=self
         )
         self.message_worker.message_ready.connect(self.display_message)
         self.message_worker.failed.connect(self.mail_error)
         self.message_worker.finished.connect(self.message_finished)
         self.message_worker.start()
 
-    def display_message(self, subject, sender, date, body):
+    def display_message(self, subject, sender, recipient, date, body):
         header = (
             f"<h2>{escape(subject)}</h2>"
             f"<p><b>De :</b> {escape(sender)}<br>"
+            f"<b>À :</b> {escape(recipient)}<br>"
             f"<b>Date :</b> {escape(date)}</p><hr>"
         )
         # Le contenu est traité comme texte, pas comme HTML actif.
@@ -556,7 +698,8 @@ class MessagerieWindow(QMainWindow):
             if not self.settings:
                 return
         dialog = SendMailDialog(self.settings, self)
-        dialog.exec()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.refresh_messages()
 
     def return_to_nuage(self):
         parent = self.parent()
