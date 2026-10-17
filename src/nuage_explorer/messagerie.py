@@ -1110,11 +1110,10 @@ class MessagerieWindow(QMainWindow):
         self.current_page = 0
         self.total_messages = 0
 
-        self.setWindowTitle("Messagerie académique — Nuage Explorer")
+        self.setWindowTitle("Messagerie académique")
         self.setStyleSheet(STYLE + "\n" + MAIL_STYLE)
-        self.resize(1050, 700)
-        self.setMinimumSize(760, 480)
-
+        self.setMinimumSize(1100, 700)
+        self.showMaximized()
         central = QWidget()
         central.setObjectName("central")
         self.setCentralWidget(central)

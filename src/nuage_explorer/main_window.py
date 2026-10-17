@@ -62,8 +62,8 @@ class MainWindow(
         self.multi_download_skipped = 0
         
         self.setWindowTitle("Nextcloud Explorer")
-        self.resize(1100, 700)
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(1100, 700)
+        self.showMaximized()
 
         central = QWidget()
         central.setObjectName("central")
