@@ -416,9 +416,17 @@ class ContactBookDialog(QDialog):
         layout.addWidget(QLabel(
             "Les contacts sont partagés dans Mail/contacts.vcf sur NUAGE."
         ))
+        
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText(
+            "Rechercher un nom, une adresse e-mail ou un groupe…"
+        )
+        self.search_edit.textChanged.connect(self._refresh_list)
+        layout.addWidget(self.search_edit)
 
         self.contact_list = QListWidget()
         self.group_filter = QComboBox()
+
         self.group_filter.addItem("Tous les groupes", "")
         for group in CONTACT_GROUPS:
             self.group_filter.addItem(group, group)
@@ -465,7 +473,8 @@ class ContactBookDialog(QDialog):
                 f"{type(exc).__name__}: {exc}",
             )
 
-    def _refresh_list(self):
+    def _refresh_list(self, *_args):
+        query = self.search_edit.text().strip().casefold()
         selected_group = self.group_filter.currentData()
 
         self.contact_list.clear()
@@ -477,6 +486,16 @@ class ContactBookDialog(QDialog):
             group = contact.get("group", DEFAULT_CONTACT_GROUP)
 
             if selected_group and group != selected_group:
+                continue
+
+            searchable = " ".join([
+                contact.get("name", ""),
+                contact.get("email", ""),
+                contact.get("phone", ""),
+                group,
+            ]).casefold()
+
+            if query not in searchable:
                 continue
 
             item = QListWidgetItem(
