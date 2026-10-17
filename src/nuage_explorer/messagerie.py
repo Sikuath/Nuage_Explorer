@@ -26,98 +26,10 @@ from PySide6.QtWidgets import (
 )
 
 from .common import save_vault, VaultError
-from .style import STYLE
+from .style import STYLE, MAIL_STYLE
 
 # Compléments à la feuille de style partagée : la messagerie utilise des
 # QListWidget et un QTextBrowser, absents des écrans principaux de Nuage.
-MAIL_STYLE = """
-/* Panneau des dossiers, dans l'esprit de la barre latérale de Nuage */
-QFrame#sidebar {
-    background-color: #17263d;
-    border: none;
-    border-radius: 10px;
-}
-QFrame#sidebar QLabel {
-    color: #dce6f4;
-}
-QFrame#sidebar QListWidget {
-    color: #dce6f4;
-    background-color: transparent;
-    border: none;
-    outline: none;
-    padding: 4px;
-}
-QFrame#sidebar QListWidget::item {
-    padding: 9px 8px;
-    border-radius: 6px;
-    margin: 1px 0;
-}
-QFrame#sidebar QListWidget::item:hover {
-    color: #ffffff;
-    background-color: #263b59;
-}
-QFrame#sidebar QListWidget::item:selected {
-    color: #ffffff;
-    background-color: #315783;
-}
-
-/* Liste des messages : alternance de tons clairs et foncés */
-QWidget#central QListWidget {
-    color: #dce6f4;
-    background-color: #1d2e47;
-    alternate-background-color: #2b405c;
-    border: 1px solid #354b68;
-    border-radius: 9px;
-    outline: none;
-    padding: 4px;
-    selection-background-color: #315783;
-    selection-color: #ffffff;
-}
-
-QWidget#central QListWidget::item {
-    background-color: #1d2e47;
-    color: #dce6f4;
-    padding: 8px;
-    border-radius: 5px;
-    margin: 1px;
-}
-
-QWidget#central QListWidget::item:alternate {
-    background-color: #2b405c;
-    color: #e5edf8;
-}
-
-QWidget#central QListWidget::item:hover {
-    background-color: #354f70;
-    color: #ffffff;
-}
-
-QWidget#central QListWidget::item:selected {
-    background-color: #315783;
-    color: #ffffff;
-}
-
-/* Lecture du message */
-QWidget#central QTextBrowser {
-    color: #dce6f4;
-    background-color: #1d2e47;
-    border: 1px solid #354b68;
-    border-radius: 9px;
-    padding: 8px;
-    selection-background-color: #315783;
-    selection-color: #ffffff;
-}
-
-/* Séparateurs et navigation entre pages */
-QSplitter::handle {
-    background-color: #30425d;
-}
-QSplitter::handle:horizontal {
-    width: 5px;
-    margin: 2px;
-}
-"""
-
 
 def _decode_mime(value):
     """Décode un en-tête MIME en texte lisible."""

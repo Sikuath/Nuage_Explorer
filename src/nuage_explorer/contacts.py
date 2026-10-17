@@ -19,6 +19,7 @@ from .common import (
     upload_file,
     WebDAVError,
 )
+from .style import CONTACTS_STYLE
 CONTACT_GROUPS = [
     "Physique-chimie",
     "Administration",
@@ -183,6 +184,8 @@ class ContactSelectionDialog(QDialog):
 
     def __init__(self, contacts, parent=None):
         super().__init__(parent)
+        self.setObjectName("contactSelectionDialog")
+        self.setStyleSheet(CONTACTS_STYLE)
         self.contacts = list(contacts or [])
 
         self.setWindowTitle("Choisir les destinataires")
@@ -207,6 +210,7 @@ class ContactSelectionDialog(QDialog):
         layout.addWidget(self.group_filter)
 
         self.contact_list = QListWidget()
+        self.contact_list.setAlternatingRowColors(True)
         self.contact_list.setSelectionMode(
             QListWidget.SelectionMode.NoSelection
         )
@@ -345,6 +349,8 @@ class ContactEditDialog(QDialog):
 
     def __init__(self, contact=None, parent=None):
         super().__init__(parent)
+        self.setObjectName("contactEditDialog")
+        self.setStyleSheet(CONTACTS_STYLE)
         contact = contact or {}
         self.setWindowTitle(
             "Modifier le contact" if contact else "Nouveau contact"
@@ -407,6 +413,8 @@ class ContactBookDialog(QDialog):
 
     def __init__(self, profile, parent=None):
         super().__init__(parent)
+        self.setObjectName("contactBookDialog")
+        self.setStyleSheet(CONTACTS_STYLE)
         self.profile = dict(profile or {})
         self.contacts = []
         self.setWindowTitle("Carnet d'adresses — NUAGE")
@@ -425,6 +433,7 @@ class ContactBookDialog(QDialog):
         layout.addWidget(self.search_edit)
 
         self.contact_list = QListWidget()
+        self.contact_list.setAlternatingRowColors(True)
         self.group_filter = QComboBox()
 
         self.group_filter.addItem("Tous les groupes", "")

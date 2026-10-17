@@ -662,3 +662,271 @@ QWidget#central QComboBox:focus {
     }
 
 """
+MAIL_STYLE = """
+/* Panneau des dossiers, dans l'esprit de la barre latérale de Nuage */
+QFrame#sidebar {
+    background-color: #17263d;
+    border: none;
+    border-radius: 10px;
+}
+QFrame#sidebar QLabel {
+    color: #dce6f4;
+}
+QFrame#sidebar QListWidget {
+    color: #dce6f4;
+    background-color: transparent;
+    border: none;
+    outline: none;
+    padding: 4px;
+}
+QFrame#sidebar QListWidget::item {
+    padding: 9px 8px;
+    border-radius: 6px;
+    margin: 1px 0;
+}
+QFrame#sidebar QListWidget::item:hover {
+    color: #ffffff;
+    background-color: #263b59;
+}
+QFrame#sidebar QListWidget::item:selected {
+    color: #ffffff;
+    background-color: #315783;
+}
+
+/* Liste des messages : alternance de tons clairs et foncés */
+QWidget#central QListWidget {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    alternate-background-color: #2b405c;
+    border: 1px solid #354b68;
+    border-radius: 9px;
+    outline: none;
+    padding: 4px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QWidget#central QListWidget::item {
+    background-color: #1d2e47;
+    color: #dce6f4;
+    padding: 8px;
+    border-radius: 5px;
+    margin: 1px;
+}
+
+QWidget#central QListWidget::item:alternate {
+    background-color: #2b405c;
+    color: #e5edf8;
+}
+
+QWidget#central QListWidget::item:hover {
+    background-color: #354f70;
+    color: #ffffff;
+}
+
+QWidget#central QListWidget::item:selected {
+    background-color: #315783;
+    color: #ffffff;
+}
+
+/* Lecture du message */
+QWidget#central QTextBrowser {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #354b68;
+    border-radius: 9px;
+    padding: 8px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+/* Séparateurs et navigation entre pages */
+QSplitter::handle {
+    background-color: #30425d;
+}
+QSplitter::handle:horizontal {
+    width: 5px;
+    margin: 2px;
+}
+"""
+
+CONTACTS_STYLE = """
+/* ==================================================
+   CARNET D'ADRESSES : FENÊTRES
+   ================================================== */
+
+QDialog#contactBookDialog,
+QDialog#contactEditDialog,
+QDialog#contactSelectionDialog {
+    background-color: #17263d;
+    color: #dce6f4;
+}
+
+QDialog#contactBookDialog QLabel,
+QDialog#contactEditDialog QLabel,
+QDialog#contactSelectionDialog QLabel {
+    color: #dce6f4;
+    background-color: transparent;
+}
+
+/* Champs de saisie */
+
+QDialog#contactBookDialog QLineEdit,
+QDialog#contactEditDialog QLineEdit,
+QDialog#contactSelectionDialog QLineEdit,
+QDialog#contactBookDialog QComboBox,
+QDialog#contactEditDialog QComboBox,
+QDialog#contactSelectionDialog QComboBox {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #405675;
+    border-radius: 7px;
+    padding: 8px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QDialog#contactBookDialog QLineEdit:focus,
+QDialog#contactEditDialog QLineEdit:focus,
+QDialog#contactSelectionDialog QLineEdit:focus,
+QDialog#contactBookDialog QComboBox:focus,
+QDialog#contactEditDialog QComboBox:focus,
+QDialog#contactSelectionDialog QComboBox:focus {
+    border: 1px solid #65a9f3;
+}
+
+/* Listes de contacts : alternance de bleus */
+
+QDialog#contactBookDialog QListWidget,
+QDialog#contactSelectionDialog QListWidget {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    alternate-background-color: #2b405c;
+    border: 1px solid #354b68;
+    border-radius: 9px;
+    outline: none;
+    padding: 4px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QDialog#contactBookDialog QListWidget::item,
+QDialog#contactSelectionDialog QListWidget::item {
+    padding: 8px;
+    border-radius: 5px;
+    margin: 1px;
+}
+
+QDialog#contactBookDialog QListWidget::item:hover,
+QDialog#contactSelectionDialog QListWidget::item:hover {
+    background-color: #354f70;
+    color: #ffffff;
+}
+
+QDialog#contactBookDialog QListWidget::item:selected,
+QDialog#contactSelectionDialog QListWidget::item:selected {
+    background-color: #315783;
+    color: #ffffff;
+}
+
+/* Menus déroulants */
+
+QDialog#contactBookDialog QComboBox QAbstractItemView,
+QDialog#contactEditDialog QComboBox QAbstractItemView,
+QDialog#contactSelectionDialog QComboBox QAbstractItemView {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #405675;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+    outline: none;
+}
+
+/* Boutons */
+
+QDialog#contactBookDialog QPushButton,
+QDialog#contactEditDialog QPushButton,
+QDialog#contactSelectionDialog QPushButton {
+    color: #dce6f4;
+    background-color: #263b59;
+    border: 1px solid #405675;
+    border-radius: 8px;
+    padding: 9px 13px;
+    min-height: 19px;
+}
+
+QDialog#contactBookDialog QPushButton:hover,
+QDialog#contactEditDialog QPushButton:hover,
+QDialog#contactSelectionDialog QPushButton:hover {
+    color: #ffffff;
+    background-color: #304968;
+    border-color: #6486ae;
+}
+
+QDialog#contactBookDialog QPushButton:pressed,
+QDialog#contactEditDialog QPushButton:pressed,
+QDialog#contactSelectionDialog QPushButton:pressed {
+    background-color: #315783;
+}
+
+QDialog#contactBookDialog QPushButton:disabled,
+QDialog#contactEditDialog QPushButton:disabled,
+QDialog#contactSelectionDialog QPushButton:disabled {
+    color: #71839d;
+    background-color: #202f46;
+    border-color: #30425d;
+}
+
+/* Cases à cocher des destinataires */
+
+QDialog#contactSelectionDialog QCheckBox {
+    color: #dce6f4;
+    spacing: 8px;
+}
+
+QDialog#contactSelectionDialog QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QDialog#contactSelectionDialog QCheckBox::indicator:unchecked {
+    background-color: #1d2e47;
+    border: 1px solid #6486ae;
+    border-radius: 3px;
+}
+
+QDialog#contactSelectionDialog QCheckBox::indicator:checked {
+    background-color: #3478c5;
+    border: 1px solid #65a9f3;
+    border-radius: 3px;
+}
+
+/* Barres de défilement */
+
+QDialog#contactBookDialog QScrollBar:vertical,
+QDialog#contactSelectionDialog QScrollBar:vertical {
+    background-color: transparent;
+    width: 10px;
+    margin: 3px;
+}
+
+QDialog#contactBookDialog QScrollBar::handle:vertical,
+QDialog#contactSelectionDialog QScrollBar::handle:vertical {
+    background-color: #405675;
+    border-radius: 5px;
+    min-height: 25px;
+}
+
+QDialog#contactBookDialog QScrollBar::handle:vertical:hover,
+QDialog#contactSelectionDialog QScrollBar::handle:vertical:hover {
+    background-color: #6486ae;
+}
+
+QDialog#contactBookDialog QScrollBar::add-line:vertical,
+QDialog#contactBookDialog QScrollBar::sub-line:vertical,
+QDialog#contactSelectionDialog QScrollBar::add-line:vertical,
+QDialog#contactSelectionDialog QScrollBar::sub-line:vertical {
+    height: 0;
+    border: none;
+}
+"""
