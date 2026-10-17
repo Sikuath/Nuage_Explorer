@@ -12,7 +12,6 @@ import re
 import smtplib
 import ssl
 import time
-import unicodedata
 from email.header import decode_header
 from email.message import EmailMessage
 from html import escape
@@ -62,11 +61,11 @@ QFrame#sidebar QListWidget::item:selected {
     background-color: #315783;
 }
 
-/* Liste des messages */
+/* Liste des messages : alternance de tons clairs et foncés */
 QWidget#central QListWidget {
     color: #dce6f4;
     background-color: #1d2e47;
-    alternate-background-color: #223650;
+    alternate-background-color: #2b405c;
     border: 1px solid #354b68;
     border-radius: 9px;
     outline: none;
@@ -74,15 +73,25 @@ QWidget#central QListWidget {
     selection-background-color: #315783;
     selection-color: #ffffff;
 }
+
 QWidget#central QListWidget::item {
+    background-color: #1d2e47;
+    color: #dce6f4;
     padding: 8px;
     border-radius: 5px;
     margin: 1px;
 }
+
+QWidget#central QListWidget::item:alternate {
+    background-color: #2b405c;
+    color: #e5edf8;
+}
+
 QWidget#central QListWidget::item:hover {
-    background-color: #293f5c;
+    background-color: #354f70;
     color: #ffffff;
 }
+
 QWidget#central QListWidget::item:selected {
     background-color: #315783;
     color: #ffffff;
@@ -109,28 +118,6 @@ QSplitter::handle:horizontal {
 }
 """
 
-def _highlight_search(text, query):
-    """Surligne en jaune les termes recherchés, sans injecter de HTML."""
-    safe_text = escape(text or "")
-    terms = sorted(
-        {term for term in (query or "").split() if term},
-        key=len,
-        reverse=True,
-    )
-
-    for term in terms:
-        pattern = re.compile(re.escape(escape(term)), re.IGNORECASE)
-        safe_text = pattern.sub(
-            lambda match: (
-                '<span style="background-color: #fff176; '
-                'color: #202020; font-weight: bold;">'
-                + match.group(0)
-                + '</span>'
-            ),
-            safe_text,
-        )
-
-    return safe_text
 
 def _decode_mime(value):
     """Décode un en-tête MIME en texte lisible."""
@@ -421,18 +408,12 @@ class MailListWorker(QThread):
     messages_ready = Signal(list, int, int)
     failed = Signal(str)
 
-    def __init__(self, settings, limit=50, folder="INBOX", page=0, query="", parent=None):
+    def __init__(self, settings, limit=50, folder="INBOX", page=0, parent=None):
         super().__init__(parent)
         self.settings = dict(settings)
         self.limit = limit
         self.folder = folder
         self.page = max(0, int(page))
-        self.query = (query or "").strip()
-
-    @staticmethod
-    def _normalize(value):
-        value = unicodedata.normalize("NFKD", value or "")
-        return "".join(char for char in value if not unicodedata.combining(char)).casefold()
 
     def run(self):
         client = None
@@ -445,54 +426,28 @@ class MailListWorker(QThread):
             if status != "OK":
                 raise RuntimeError("Impossible de récupérer la liste des messages.")
             ids = data[0].split() if data and data[0] else []
-            query_terms = [self._normalize(term) for term in self.query.split() if term]
-            matched = []
-
-            # Sans recherche, on ne récupère que les en-têtes de la page courante.
-            # Avec une recherche, on parcourt tous les en-têtes du dossier pour
-            # retrouver aussi les messages anciens, puis on pagine les résultats.
-            if query_terms:
-                candidates = reversed(ids)
-            else:
-                total_ids = len(ids)
-                max_page = max(0, (total_ids - 1) // self.limit)
-                page = min(self.page, max_page)
-                end = total_ids - (page * self.limit)
-                start = max(0, end - self.limit)
-                candidates = reversed(ids[start:end])
-
-            for sequence in candidates:
+            total = len(ids)
+            # Page 0 = the 50 most recent messages; higher pages go backward.
+            max_page = max(0, (total - 1) // self.limit)
+            page = min(self.page, max_page)
+            end = total - (page * self.limit)
+            start = max(0, end - self.limit)
+            page_ids = ids[start:end]
+            results = []
+            for sequence in reversed(page_ids):
                 status, fetched = client.fetch(sequence, "(BODY.PEEK[HEADER])")
                 if status != "OK" or not fetched or not fetched[0]:
                     continue
                 raw = fetched[0][1]
                 parsed = email.message_from_bytes(raw)
-                item = {
+                results.append({
                     "id": sequence.decode("ascii", errors="ignore"),
                     "subject": _decode_mime(parsed.get("Subject", "")) or "(Sans objet)",
                     "sender": _decode_mime(parsed.get("From", "")),
                     "to": _decode_mime(parsed.get("To", "")),
                     "cc": _decode_mime(parsed.get("Cc", "")),
                     "date": _decode_mime(parsed.get("Date", "")),
-                }
-                if query_terms:
-                    searchable = self._normalize(" ".join((
-                        item["subject"], item["sender"], item["to"], item["cc"],
-                        item["date"], self.folder,
-                    )))
-                    if not all(term in searchable for term in query_terms):
-                        continue
-                matched.append(item)
-
-            if query_terms:
-                total = len(matched)
-                max_page = max(0, (total - 1) // self.limit)
-                page = min(self.page, max_page)
-                start = page * self.limit
-                results = matched[start:start + self.limit]
-            else:
-                total = len(ids)
-                results = matched
+                })
             self.messages_ready.emit(results, total, page)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -1242,7 +1197,6 @@ class MessagerieWindow(QMainWindow):
         self.page_size = 50
         self.current_page = 0
         self.total_messages = 0
-        self.search_query = ""
 
         self.setWindowTitle("Messagerie académique — Nuage Explorer")
         self.setStyleSheet(STYLE + "\n" + MAIL_STYLE)
@@ -1309,31 +1263,14 @@ class MessagerieWindow(QMainWindow):
         main_splitter.addWidget(folder_panel)
 
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
-        message_panel = QWidget()
-        message_panel_layout = QVBoxLayout(message_panel)
-        message_panel_layout.setContentsMargins(0, 0, 0, 0)
-        message_panel_layout.setSpacing(8)
-        search_row = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText(
-            "Rechercher dans ce dossier : auteur, objet, destinataire, date…"
-        )
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.returnPressed.connect(self.search_messages)
-        search_row.addWidget(self.search_edit, 1)
-        self.search_button = QPushButton("Rechercher")
-        self.search_button.clicked.connect(self.search_messages)
-        search_row.addWidget(self.search_button)
-        message_panel_layout.addLayout(search_row)
-
         self.message_list = QListWidget()
+        self.message_list.setAlternatingRowColors(True)
         self.message_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.message_list.setMinimumWidth(260)
         self.message_list.currentItemChanged.connect(self.select_message)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.message_list.customContextMenuRequested.connect(self.show_message_context_menu)
-        message_panel_layout.addWidget(self.message_list, 1)
-        content_splitter.addWidget(message_panel)
+        content_splitter.addWidget(self.message_list)
 
         self.message_view = QTextBrowser()
         self.message_view.setOpenExternalLinks(False)
@@ -1538,19 +1475,6 @@ class MessagerieWindow(QMainWindow):
             return
         self.current_folder = folder
         self.current_page = 0
-        self.search_query = ""
-        self.search_edit.clear()
-        self.refresh_messages()
-
-    def search_messages(self):
-        """Lance une recherche dans les en-têtes du dossier sélectionné."""
-        query = self.search_edit.text().strip()
-        if query == self.search_query:
-            self.current_page = 0
-            self.refresh_messages()
-            return
-        self.search_query = query
-        self.current_page = 0
         self.refresh_messages()
 
     def show_previous_page(self):
@@ -1576,17 +1500,13 @@ class MessagerieWindow(QMainWindow):
 
         self.message_list.clear()
         self.message_view.clear()
-        self.status_label.setText(
-            "Recherche dans les en-têtes du dossier…" if self.search_query
-            else "Connexion au serveur IMAP…"
-        )
+        self.status_label.setText("Connexion au serveur IMAP…")
         self.refresh_button.setEnabled(False)
-        self.search_button.setEnabled(False)
         self.previous_page_button.setEnabled(False)
         self.next_page_button.setEnabled(False)
         self.list_worker = MailListWorker(
             self.settings, limit=self.page_size, folder=self.current_folder,
-            page=self.current_page, query=self.search_query, parent=self
+            page=self.current_page, parent=self
         )
         self.list_worker.messages_ready.connect(self.messages_loaded)
         self.list_worker.failed.connect(self.mail_error)
@@ -1615,35 +1535,23 @@ class MessagerieWindow(QMainWindow):
         if total:
             first_number = page * self.page_size + 1
             last_number = min((page + 1) * self.page_size, total)
-            prefix = "Résultats" if self.search_query else "Messages"
             self.page_label.setText(
-                f"{prefix} {first_number}–{last_number} sur {total}  ·  Page {page + 1}"
+                f"Messages {first_number}–{last_number} sur {total}  ·  Page {page + 1}"
             )
         else:
-            self.page_label.setText("Aucun résultat" if self.search_query else "Aucun message")
+            self.page_label.setText("Aucun message")
         self.previous_page_button.setEnabled(page > 0)
         self.next_page_button.setEnabled((page + 1) * self.page_size < total)
-        if self.search_query:
-            self.status_label.setText(
-                f"{len(messages)} résultat(s) affiché(s) — recherche dans {folder_label}."
-            )
-        else:
-            self.status_label.setText(
-                f"{len(messages)} message(s) chargé(s) — {folder_label}."
-            )
+        self.status_label.setText(
+            f"{len(messages)} message(s) chargé(s) — {folder_label}."
+        )
         if not messages:
-            if self.search_query:
-                self.message_view.setPlainText(
-                    f"Aucun message ne correspond à « {self.search_query} » dans « {folder_label} »."
-                )
-            else:
-                self.message_view.setPlainText(f"Le dossier « {folder_label} » est vide.")
+            self.message_view.setPlainText(f"Le dossier « {folder_label} » est vide.")
         self.sync_contacts_from_messages(messages)
 
     def list_finished(self):
         finished_folder = self.list_worker.folder if self.list_worker is not None else None
         self.refresh_button.setEnabled(True)
-        self.search_button.setEnabled(True)
         self.list_worker = None
         # Si l'utilisateur a changé de dossier pendant le chargement, lance
         # maintenant le chargement du dossier réellement sélectionné.
@@ -1793,17 +1701,14 @@ class MessagerieWindow(QMainWindow):
         self.message_worker.failed.connect(self.mail_error)
         self.message_worker.finished.connect(self.message_finished)
         self.message_worker.start()
-    
+
     def display_message(self, subject, sender, recipient, date, body):
-        query = self.search_query
-
         header = (
-            f"<h2>{_highlight_search(subject, query)}</h2>"
-            f"<p><b>De :</b> {_highlight_search(sender, query)}<br>"
-            f"<b>À :</b> {_highlight_search(recipient, query)}<br>"
-            f"<b>Date :</b> {_highlight_search(date, query)}</p><hr>"
+            f"<h2>{escape(subject)}</h2>"
+            f"<p><b>De :</b> {escape(sender)}<br>"
+            f"<b>À :</b> {escape(recipient)}<br>"
+            f"<b>Date :</b> {escape(date)}</p><hr>"
         )
-
         # Les courriels HTML sont rendus avec leur mise en forme. Les images
         # distantes/pixels de suivi sont retirés dans _prepare_mail_html.
         if re.search(r"<\s*(?:html|body|div|p|table|span|h[1-6])\b", body, flags=re.I):
