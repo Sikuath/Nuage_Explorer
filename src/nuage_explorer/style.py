@@ -748,6 +748,87 @@ QSplitter::handle:horizontal {
     width: 5px;
     margin: 2px;
 }
+
+/* ==================================================
+   FENÊTRE NOUVEAU MESSAGE / RÉPONDRE
+   ================================================== */
+
+QDialog#sendMailDialog {
+    background-color: #17263d;
+    color: #dce6f4;
+}
+
+QDialog#sendMailDialog QWidget {
+    color: #dce6f4;
+}
+
+QDialog#sendMailDialog QLabel {
+    color: #dce6f4;
+    background-color: transparent;
+}
+
+QDialog#sendMailDialog QLineEdit,
+QDialog#sendMailDialog QTextEdit,
+QDialog#sendMailDialog QPlainTextEdit,
+QDialog#sendMailDialog QListWidget,
+QDialog#sendMailDialog QComboBox {
+    color: #dce6f4;
+    background-color: #1d2e47;
+    border: 1px solid #405675;
+    border-radius: 7px;
+    padding: 7px;
+    selection-background-color: #315783;
+    selection-color: #ffffff;
+}
+
+QDialog#sendMailDialog QLineEdit:focus,
+QDialog#sendMailDialog QTextEdit:focus,
+QDialog#sendMailDialog QPlainTextEdit:focus,
+QDialog#sendMailDialog QComboBox:focus {
+    border: 1px solid #65a9f3;
+}
+
+QDialog#sendMailDialog QPushButton {
+    color: #dce6f4;
+    background-color: #263b59;
+    border: 1px solid #405675;
+    border-radius: 8px;
+    padding: 9px 13px;
+}
+
+QDialog#sendMailDialog QPushButton:hover {
+    color: #ffffff;
+    background-color: #304968;
+    border-color: #6486ae;
+}
+
+QDialog#sendMailDialog QPushButton:pressed {
+    background-color: #315783;
+}
+
+QDialog#sendMailDialog QScrollArea,
+QDialog#sendMailDialog QScrollArea QWidget {
+    background-color: #17263d;
+}
+
+QDialog#sendMailDialog QScrollBar:vertical {
+    background-color: #17263d;
+    width: 10px;
+    margin: 3px;
+}
+
+QDialog#sendMailDialog QScrollBar::handle:vertical {
+    background-color: #405675;
+    border-radius: 5px;
+    min-height: 25px;
+}
+
+QDialog#sendMailDialog QScrollBar::add-line:vertical,
+QDialog#sendMailDialog QScrollBar::sub-line:vertical {
+    height: 0;
+    border: none;
+}
+
 """
 
 CONTACTS_STYLE = """
@@ -929,4 +1010,5 @@ QDialog#contactSelectionDialog QScrollBar::sub-line:vertical {
     height: 0;
     border: none;
 }
+
 """

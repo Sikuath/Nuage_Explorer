@@ -558,6 +558,8 @@ class SendMailDialog(QDialog):
 
     def __init__(self, settings, parent=None, draft=None, contacts=None):
         super().__init__(parent)
+        self.setObjectName("sendMailDialog")
+        self.setStyleSheet(STYLE + "\n" + MAIL_STYLE)
         self.settings = dict(settings)
         self.draft = dict(draft or {})
         self.contacts = list(contacts or [])
@@ -1652,15 +1654,24 @@ class MessagerieWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.load_folders()  # actualise aussi les compteurs des dossiers
             self.refresh_messages()
-
+    
     def return_to_nuage(self):
+        """Masque la messagerie et revient à la fenêtre principale."""
         parent = self.parent()
         if parent is not None:
-            parent.show()
+            parent.showMaximized()
             parent.raise_()
             parent.activateWindow()
         self.hide()
 
     def closeEvent(self, event):
-        # La fenêtre principale reste ouverte.
+        """À la fermeture de la messagerie, revient à Nuage Explorer."""
+        parent = self.parent()
+
+        if parent is not None:
+            parent.showMaximized()
+            parent.raise_()
+            parent.activateWindow()
+
+        # Ferme la fenêtre de messagerie.
         event.accept()

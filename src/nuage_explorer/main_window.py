@@ -295,18 +295,16 @@ class MainWindow(
             self.status_label.setText(
                 "Aucun compte configuré. Ouvre « Compte et connexion »."
             )
+    
     def open_messaging(self):
-        """Ouvre la fenêtre de messagerie en conservant Nuage Explorer ouvert."""
+        """Affiche la messagerie en masquant temporairement Nuage Explorer."""
         try:
-            # Import différé : le module sera chargé uniquement à l'ouverture.
             from .messagerie import MessagerieWindow
         except ImportError as exc:
             QMessageBox.information(
                 self,
                 "Messagerie",
-                "Le bouton est en place, mais le module messagerie.py "
-                "n'est pas encore disponible.\n\n"
-                "Il sera relié à la nouvelle fenêtre lors de l'ajout du module.",
+                f"Impossible de charger le module de messagerie :\n{exc}",
             )
             return
 
@@ -319,9 +317,22 @@ class MainWindow(
                 profile=self.profile,
             )
 
+            # Quand la messagerie se ferme, réafficher Nuage Explorer.
+            self.messaging_window.destroyed.connect(
+                self._on_messaging_closed
+            )
+
+        self.hide()
         self.messaging_window.show()
         self.messaging_window.raise_()
         self.messaging_window.activateWindow()
+
+    def _on_messaging_closed(self, *args):
+        """Réaffiche Nuage Explorer après la fermeture de la messagerie."""
+        self.messaging_window = None
+        self.showMaximized()
+        self.raise_()
+        self.activateWindow()
 
     def closeEvent(self, event):
         self.storage_widget.shutdown()
